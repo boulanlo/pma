@@ -1,0 +1,7 @@
+[package]
+name = "pma"
+version = "0.1.0"
+authors = ["Louis Boulanger <louis.boulanger74@hotmail.fr>"]
+edition = "2018"
+
+[dependencies]
