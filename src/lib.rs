@@ -1,7 +1,6 @@
 use std::iter::Filter;
 ///! A packed-memory array structure implementation
 use std::ops::{Index, Range};
-use std::slice::SliceIndex;
 use std::vec::IntoIter;
 
 /// A fake Option trait, allowing to store a Some/None information
@@ -123,7 +122,7 @@ impl<T: FakeOption> PMA<T> {
     /// use pma::PMA;
     ///
     /// let data = 0u32..1024;
-    /// let pma = PMA::from_iterator(data, 0.3..0.7, 0.08..0.92);
+    /// let pma = PMA::from_iterator(data, 0.3..0.7, 0.08..0.92, 14);
     ///
     /// assert!(pma.is_density_respected());
     /// ```
@@ -137,8 +136,6 @@ impl<T: FakeOption> PMA<T> {
         I: ExactSizeIterator<Item = T>,
     {
         let element_count = iterator.len();
-        let segment_size =
-            ((2.0 * element_count as f64).log2().ceil() as usize).next_power_of_two();
 
         let segment_count_upper =
             (((2.0 * element_count as f64) / segment_size as f64) as usize).next_power_of_two();
@@ -186,7 +183,7 @@ impl<T: FakeOption> PMA<T> {
     /// ```
     /// use pma::PMA;
     ///
-    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92);
+    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92, 14);
     ///
     /// assert_eq!(pma.element_count(), 15);
     pub fn element_count(&self) -> usize {
@@ -205,10 +202,24 @@ impl<T: FakeOption> PMA<T> {
         self.element_count() as f64 / self.data.len() as f64
     }
 
+    /// Returns an iterator over a range of the PMA data
+    ///
+    /// # Example
+    /// ```
+    /// use pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..16, 0.3..0.7, 0.08..0.92, 14);
+    ///
+    /// let result: Vec<&u32> = pma.iter(5..8).collect();
+    /// let expected: Vec<u32> = (5..8).collect();
+    /// let expected_ref : Vec<&u32> = expected.iter().collect();
+    /// assert_eq!(result, expected_ref);
+    /// ```
     pub fn iter(&self, range: Range<usize>) -> impl Iterator<Item = &T> {
         self.data[range].iter().filter(|&e| !e.is_none())
     }
 
+    // TODO: Fix the bug, it's not working !!!
     pub fn iter_chunks(&self, range: Range<usize>) -> impl Iterator<Item = &T> {
         self.data[range]
             .chunks(self.segment_size)
