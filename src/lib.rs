@@ -1,7 +1,45 @@
+///! A packed-memory array structure implementation
 use std::ops::Range;
 
+/// A fake Option trait, allowing to store a Some/None information
+/// without doubling the size in memory.
+///
+/// It works by restricting a value in the type's possible values and
+/// interpreting it as a None. All other values are Some.
+///
+/// # Example
+/// ```
+/// use pma::FakeOption;
+///
+/// struct Foo<T: FakeOption> {
+///     data: Vec<T>,
+/// }
+///
+/// let mut foo: Foo<u64> = Foo {
+///     data: vec![u64::none(), 3],
+/// };
+/// assert!(!foo.data.pop().unwrap().is_none());
+/// assert!(foo.data.pop().unwrap().is_none());
+/// ```
 pub trait FakeOption {
+    /// Returns `true` if the value is considered as None, and `false`
+    /// otherwise
+    ///
+    /// # Example
+    /// ```
+    /// use pma::FakeOption;
+    ///
+    /// let a = u64::none();
+    /// let b = 5u64;
+    ///
+    /// assert!(a.is_none());
+    /// assert!(!b.is_none());
+    /// ```
     fn is_none(&self) -> bool;
+
+    /// Returns the None value associated to the type. This value must
+    /// be unique and consistent, and should be a seldom used value.
+    /// For example, we use `u64::MAX` for the u64 type.
     fn none() -> Self;
 }
 
@@ -25,6 +63,31 @@ impl FakeOption for u32 {
     }
 }
 
+/// A Packed-Memory Array structure implementation, which keeps gaps in the
+/// underlying vector to enable fast insertion in the structure.
+///
+/// ## Structure
+/// This structure works by keep a sorted vector of elements, separated into
+/// windows of segments. In this implementation, we use a perfect binary tree
+/// (implicitly) to keep the number of segments equal to a power of 2. The
+/// element vector is sparse : there are gaps in each segments. The density of
+/// the segments, each window and the overall PMA is restricted by bounds. The
+/// PMA bounds and the segments bounds is fixed by the user (we recommend using
+/// 0.3..0.7 for the PMA and 0.08..0.92 for the segments[^1]).
+///
+/// ## Rebalancing
+/// When an element is inserted into the structure, the structure checks if the
+/// density bounds are violated. If this is the case, the insertion triggers a
+/// _rebalance_ operation, effectively rebalancing the implicit tree to restore
+/// the density bounds. If the overall bounds are violated, the structure doubles
+/// its vector size and redistributes the elements in the newly extended vector.
+///
+/// ## Complexity
+/// With the gaps scheme, the insertion cost is performed in O(log² N) amortized
+/// element moves, and with special patterns (like a random insertion), the cost
+/// is reduced to O(log N).[^1]
+///
+/// [^1]: Durand, M., Raffin, B. & Faure, F (2012). A Packed Memory Array to Keep Particles Sorted.
 pub struct PMA<T: FakeOption> {
     data: Vec<T>,
     pma_bounds: Range<f64>,
@@ -33,6 +96,20 @@ pub struct PMA<T: FakeOption> {
 }
 
 impl<T: FakeOption> PMA<T> {
+    /// Creates a PMA from an `ExactSizeIterator`.
+    ///
+    /// The current algorithm for creating the PMA guarantees that the density
+    /// of the structure will always be 0.5 ± 0.225.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::PMA;
+    ///
+    /// let data = 0u32..1024;
+    /// let pma = PMA::from_iterator(data, 0.3..0.7, 0.08..0.92);
+    ///
+    /// assert!(pma.is_density_respected());
+    /// ```
     pub fn from_iterator<I>(
         mut iterator: I,
         pma_bounds: Range<f64>,
@@ -85,27 +162,65 @@ impl<T: FakeOption> PMA<T> {
         }
     }
 
-    fn element_count(&self) -> usize {
+    /// Returns the number of non-None elements in the structure.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92);
+    ///
+    /// assert_eq!(pma.element_count(), 15);
+    pub fn element_count(&self) -> usize {
         self.data.iter().filter(|e| !e.is_none()).count()
     }
 
-    fn segment_size(&self) -> usize {
-        (2.0 * self.element_count() as f64).log2().ceil() as usize
+    /// Returns `true` if the density bounds of the overall PMA is respected,
+    /// and `false` otherwise.
+    pub fn is_density_respected(&self) -> bool {
+        let density = self.density();
+        density <= self.pma_bounds.end && density >= self.pma_bounds.start
     }
 
-    fn segment_count(&self) -> usize {
-        ((2.0 * self.element_count() as f64) / self.segment_size() as f64).ceil() as usize
-    }
-
-    pub fn elements(&self) -> Vec<&T> {
-        self.data.iter().filter(|e| !e.is_none()).collect()
-    }
-
-    pub fn elements_with_holes(&self) -> Vec<&T> {
-        self.data.iter().collect()
-    }
-
+    /// Returns the density of the overall PMA
     pub fn density(&self) -> f64 {
         self.element_count() as f64 / self.data.len() as f64
+    }
+}
+
+pub struct PMAIterator<T: FakeOption> {
+    pma: PMA<T>,
+    initialized: bool,
+}
+
+impl<T: FakeOption> Iterator for PMAIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.initialized {
+            self.initialized = true;
+            self.pma.data.reverse();
+        }
+        loop {
+            if let Some(elem) = self.pma.data.pop() {
+                if !elem.is_none() {
+                    return Some(elem);
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
+impl<T: FakeOption> IntoIterator for PMA<T> {
+    type Item = T;
+    type IntoIter = PMAIterator<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        PMAIterator {
+            pma: self,
+            initialized: false,
+        }
     }
 }
