@@ -1,18 +1,4 @@
-8 segments : 3 3 3 3 3 2 2 2
-             |       | |   |
-	     ----v---- --v--
-	        15       6
-n = 21
-t = 5
+version de into iter avec itération sur les blocs (sauter les trous)
 
-let break : 21 % 8 = 5
-for i in 0..break
-   insert ceil(21/8) next elems
-   insert t - ceil(21/8) holes
-for i in break..8-break
-   insert floor(21/8) next elems
-   insert t - floor(21/8) holes
-done
-
-boucle sur la taille du vecteur
-i/t = nombre de segments
+se mettre en nightly pour mettre la taille des segments en const generic
+et régler le problème de index

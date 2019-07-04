@@ -1,5 +1,8 @@
+use std::iter::Filter;
 ///! A packed-memory array structure implementation
-use std::ops::Range;
+use std::ops::{Index, Range};
+use std::slice::SliceIndex;
+use std::vec::IntoIter;
 
 /// A fake Option trait, allowing to store a Some/None information
 /// without doubling the size in memory.
@@ -63,6 +66,20 @@ impl FakeOption for u32 {
     }
 }
 
+pub struct PMASlice<T: FakeOption>([T]);
+
+impl<T: FakeOption> PMASlice<T> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.0.iter().filter(|&e| !e.is_none())
+    }
+
+    pub fn iter_chunks(&self, segment_size: usize) -> impl Iterator<Item = &T> {
+        self.0
+            .chunks(segment_size)
+            .flat_map(|s| s.iter().take_while(|&e| !e.is_none()))
+    }
+}
+
 /// A Packed-Memory Array structure implementation, which keeps gaps in the
 /// underlying vector to enable fast insertion in the structure.
 ///
@@ -114,6 +131,7 @@ impl<T: FakeOption> PMA<T> {
         mut iterator: I,
         pma_bounds: Range<f64>,
         segments_bounds: Range<f64>,
+        segment_size: usize,
     ) -> PMA<T>
     where
         I: ExactSizeIterator<Item = T>,
@@ -186,41 +204,31 @@ impl<T: FakeOption> PMA<T> {
     pub fn density(&self) -> f64 {
         self.element_count() as f64 / self.data.len() as f64
     }
+
+    pub fn iter(&self, range: Range<usize>) -> impl Iterator<Item = &T> {
+        self.data[range].iter().filter(|&e| !e.is_none())
+    }
+
+    pub fn iter_chunks(&self, range: Range<usize>) -> impl Iterator<Item = &T> {
+        self.data[range]
+            .chunks(self.segment_size)
+            .flat_map(|s| s.iter().take_while(|&e| !e.is_none()))
+    }
 }
 
-pub struct PMAIterator<T: FakeOption> {
-    pma: PMA<T>,
-    initialized: bool,
-}
+impl<T: FakeOption> Index<Range<usize>> for PMA<T> {
+    type Output = [T];
 
-impl<T: FakeOption> Iterator for PMAIterator<T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.initialized {
-            self.initialized = true;
-            self.pma.data.reverse();
-        }
-        loop {
-            if let Some(elem) = self.pma.data.pop() {
-                if !elem.is_none() {
-                    return Some(elem);
-                }
-            } else {
-                return None;
-            }
-        }
+    fn index(&self, index: Range<usize>) -> &Self::Output {
+        &self.data[index]
     }
 }
 
 impl<T: FakeOption> IntoIterator for PMA<T> {
     type Item = T;
-    type IntoIter = PMAIterator<T>;
+    type IntoIter = Filter<IntoIter<T>, fn(&T) -> bool>;
 
     fn into_iter(self) -> Self::IntoIter {
-        PMAIterator {
-            pma: self,
-            initialized: false,
-        }
+        self.data.into_iter().filter(|e| !e.is_none())
     }
 }
