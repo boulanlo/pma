@@ -106,8 +106,8 @@ impl<T: FakeOption> PMASlice<T> {
 /// [^1]: Durand, M., Raffin, B. & Faure, F (2012). A Packed Memory Array to Keep Particles Sorted.
 pub struct PMA<T: FakeOption> {
     data: Vec<T>,
-    pma_bounds: Range<f64>,
-    segments_bounds: Range<f64>,
+    pub pma_bounds: Range<usize>,
+    pub segment_bounds: Range<usize>,
     segment_size: usize,
 }
 
@@ -122,14 +122,15 @@ impl<T: FakeOption> PMA<T> {
     /// use pma::PMA;
     ///
     /// let data = 0u32..1024;
-    /// let pma = PMA::from_iterator(data, 0.3..0.7, 0.08..0.92, 14);
+    /// let pma = PMA::from_iterator(data, 0.3..0.7, 0.08..0.92, 8);
     ///
+    /// println!("{:?} {:?}", pma.pma_bounds, pma.segment_bounds);
     /// assert!(pma.is_density_respected());
     /// ```
     pub fn from_iterator<I>(
         mut iterator: I,
         pma_bounds: Range<f64>,
-        segments_bounds: Range<f64>,
+        segment_bounds: Range<f64>,
         segment_size: usize,
     ) -> PMA<T>
     where
@@ -169,10 +170,16 @@ impl<T: FakeOption> PMA<T> {
             }
         }
 
+        let array_size = segment_count * segment_size;
+        let pma_bounds: Range<usize> = (pma_bounds.start * array_size as f64) as usize
+            ..(pma_bounds.end * array_size as f64) as usize;
+        let segment_bounds: Range<usize> = (segment_bounds.start * segment_size as f64) as usize
+            ..(segment_bounds.end * segment_size as f64) as usize;
+
         PMA {
             data,
             pma_bounds,
-            segments_bounds,
+            segment_bounds,
             segment_size,
         }
     }
@@ -183,9 +190,10 @@ impl<T: FakeOption> PMA<T> {
     /// ```
     /// use pma::PMA;
     ///
-    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92, 14);
+    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92, 8);
     ///
     /// assert_eq!(pma.element_count(), 15);
+    /// ```
     pub fn element_count(&self) -> usize {
         self.data.iter().filter(|e| !e.is_none()).count()
     }
@@ -193,8 +201,8 @@ impl<T: FakeOption> PMA<T> {
     /// Returns `true` if the density bounds of the overall PMA is respected,
     /// and `false` otherwise.
     pub fn is_density_respected(&self) -> bool {
-        let density = self.density();
-        density <= self.pma_bounds.end && density >= self.pma_bounds.start
+        let len = self.element_count();
+        len <= self.pma_bounds.end && len >= self.pma_bounds.start
     }
 
     /// Returns the density of the overall PMA
@@ -202,24 +210,40 @@ impl<T: FakeOption> PMA<T> {
         self.element_count() as f64 / self.data.len() as f64
     }
 
-    /// Returns an iterator over a range of the PMA data
+    /// Returns an iterator over valid elements in the PMA, given a range
+    ///
+    /// Note that the total number of elements iterated over might not match
+    /// the range size, as there are gaps in the PMA array.
     ///
     /// # Example
     /// ```
     /// use pma::PMA;
     ///
-    /// let pma = PMA::from_iterator(0u32..16, 0.3..0.7, 0.08..0.92, 14);
+    /// let pma = PMA::from_iterator(0u32..16, 0.3..0.7, 0.08..0.92, 8);
+    /// let expected = (0..16).collect::<Vec<u32>>();
+    /// let expected_ref = expected.iter().collect::<Vec<&u32>>();
     ///
-    /// let result: Vec<&u32> = pma.iter(5..8).collect();
-    /// let expected: Vec<u32> = (5..8).collect();
-    /// let expected_ref : Vec<&u32> = expected.iter().collect();
-    /// assert_eq!(result, expected_ref);
+    /// assert_eq!(pma.iter(0..32).collect::<Vec<&u32>>(), expected_ref);
     /// ```
     pub fn iter(&self, range: Range<usize>) -> impl Iterator<Item = &T> {
         self.data[range].iter().filter(|&e| !e.is_none())
     }
 
-    // TODO: Fix the bug, it's not working !!!
+    /// Same method as `iter()`, but iterates with chunks.
+    ///
+    /// Note that the total number of elements iterated over might not match
+    /// the range size, as there are gaps in the PMA array.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..16, 0.3..0.7, 0.08..0.92, 8);
+    /// let expected = (0..16).collect::<Vec<u32>>();
+    /// let expected_ref = expected.iter().collect::<Vec<&u32>>();
+    ///
+    /// assert_eq!(pma.iter_chunks(0..32).collect::<Vec<&u32>>(), expected_ref);
+    /// ```
     pub fn iter_chunks(&self, range: Range<usize>) -> impl Iterator<Item = &T> {
         self.data[range]
             .chunks(self.segment_size)
