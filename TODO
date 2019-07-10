@@ -1,4 +1,3 @@
-version de into iter avec itération sur les blocs (sauter les trous)
-
-se mettre en nightly pour mettre la taille des segments en const generic
-et régler le problème de index
+faire itérateur sur les indices des éléments (enumerate) et ajouter début de la range
+zipper et utiliser la méthode swap des slices mutables pour tout mettre à gauche
+trouver les indices des positions des futurs éléments dans le tableau, iter, zipper pour mettre dans les bonnes pos

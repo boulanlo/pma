@@ -5,3 +5,5 @@ authors = ["Louis Boulanger <louis.boulanger74@hotmail.fr>"]
 edition = "2018"
 
 [dependencies]
+rayon_logs = {optional=true, git="https://github.com/wagnerf42/rayon-logs"}
+rayon_adaptive = {path="../rayon-adaptive", features=["logs"]}

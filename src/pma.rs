@@ -1,0 +1,565 @@
+extern crate rayon_adaptive;
+use rayon_adaptive::prelude::*;
+
+use rayon_adaptive::IndexedPower;
+use std::cmp::Ordering;
+use std::iter::repeat;
+use std::iter::Filter;
+use std::ops::{Index, Range};
+use std::slice::SliceIndex;
+use std::vec::IntoIter;
+
+#[derive(Debug)]
+pub struct Window<'a, T> {
+    pma: &'a PMA<T>,
+    segments_range: Range<usize>,
+    current_index: usize,
+    end_index: usize,
+}
+
+impl<'a, T> Iterator for Window<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.segments_range.start == self.segments_range.end
+            || (self.segments_range.len() == 1 && self.current_index == self.end_index)
+        {
+            None
+        } else {
+            let t = Some(
+                &self.pma.data
+                    [self.segments_range.start * self.pma.segment_size + self.current_index],
+            );
+            self.current_index += 1;
+
+            if self.current_index == self.pma.element_counts[self.segments_range.start] {
+                self.current_index = 0;
+                self.segments_range.start += 1;
+            }
+            t
+        }
+    }
+}
+
+impl<'a, T: std::fmt::Debug> Divisible for Window<'a, T> {
+    type Power = IndexedPower;
+    fn base_length(&self) -> Option<usize> {
+        let range = &self.segments_range;
+
+        let mut length = self.pma.element_counts[range.start..(range.end - 1)]
+            .iter()
+            .sum();
+
+        length += self.end_index;
+        length -= self.current_index;
+        Some(length)
+    }
+
+    fn divide_at(mut self, index: usize) -> (Self, Self) {
+        let (segment_index, sum) = self
+            .segments_range
+            .clone()
+            .scan(-(self.current_index as isize), |current_sum, index| {
+                *current_sum += (self.pma.element_counts[index]
+                    - if index == self.segments_range.end {
+                        self.end_index
+                    } else {
+                        0
+                    }) as isize;
+                Some(*current_sum)
+            })
+            .map(|s| s as usize)
+            .enumerate()
+            .find(|&(_, s)| s >= index)
+            .unwrap();
+
+        let end = (index + self.pma.element_counts[segment_index]) - sum;
+
+        let mut right = Window {
+            pma: self.pma,
+            segments_range: segment_index..self.segments_range.end,
+            current_index: end,
+            end_index: self.end_index,
+        };
+
+        if self.pma.element_counts[segment_index] == end {
+            right.current_index = 0;
+            right.segments_range.start += 1;
+        }
+
+        self.segments_range.end = segment_index + 1;
+
+        self.end_index = end;
+
+        (self, right)
+    }
+}
+
+/// A Packed-Memory Array structure implementation, which keeps gaps in the
+/// underlying vector to enable fast insertion in the structure.
+///
+/// ## Structure
+/// This structure works by keep a sorted vector of elements, separated into
+/// windows of segments. In this implementation, we use a perfect binary tree
+/// (implicitly) to keep the number of segments equal to a power of 2. The
+/// element vector is sparse : there are gaps in each segments. The density of
+/// the segments, each window and the overall PMA is restricted by bounds. The
+/// PMA bounds and the segments bounds is fixed by the user (we recommend using
+/// 0.3..0.7 for the PMA and 0.08..0.92 for the segments[^1]).
+///
+/// ## Rebalancing
+/// When an element is inserted into the structure, the structure checks if the
+/// density bounds are violated. If this is the case, the insertion triggers a
+/// _rebalance_ operation, effectively rebalancing the implicit tree to restore
+/// the density bounds. If the overall bounds are violated, the structure doubles
+/// its vector size and redistributes the elements in the newly extended vector.
+///
+/// ## Complexity
+/// With the gaps scheme, the insertion cost is performed in O(log² N) amortized
+/// element moves, and with special patterns (like a random insertion), the cost
+/// is reduced to O(log N).[^1]
+///
+/// [^1]: Durand, M., Raffin, B. & Faure, F (2012). A Packed Memory Array to Keep Particles Sorted
+#[derive(Debug)]
+pub struct PMA<T> {
+    pub data: Vec<T>,
+    bounds: Vec<Range<usize>>,
+    segment_size: usize,
+    element_counts: Vec<usize>,
+}
+
+impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
+    /// Creates a PMA from an `ExactSizeIterator`.
+    ///
+    /// The current algorithm for creating the PMA guarantees that the density
+    /// of the structure will always be 0.5 ± 0.225.
+    ///
+    /// # Example
+    /// ```
+    /// ```
+    pub fn from_iterator<I>(
+        mut iterator: I,
+        pma_density_bounds: Range<f64>,
+        segment_density_bounds: Range<f64>,
+        segment_size: usize,
+    ) -> PMA<T>
+    where
+        I: ExactSizeIterator<Item = T>,
+    {
+        let total_element_count = iterator.len();
+
+        // Calculate the optimal segment count. The strategy is to try to use two segment counts, and
+        // look at the calculated density obtained with each one. We then choose the segment count that
+        // yields the density closest to 0.5 (50%).
+        let segment_count_upper =
+            (((2 * total_element_count) as f64 / segment_size as f64) as usize).next_power_of_two();
+        let segment_count_lower = segment_count_upper / 2;
+
+        let density_upper =
+            total_element_count as f64 / (segment_size * segment_count_upper) as f64;
+        let density_lower =
+            total_element_count as f64 / (segment_size * segment_count_lower) as f64;
+
+        let segment_count = if (density_upper - 0.5).abs() < (density_lower - 0.5).abs() {
+            segment_count_upper
+        } else {
+            segment_count_lower
+        };
+
+        // Arrange data in the vector, with appropriate gaps.
+        let element_count_per_segment = total_element_count / segment_count;
+        let modulo = total_element_count % segment_count;
+        let mut data: Vec<T> = Vec::new();
+
+        let mut window_element_counts: Vec<usize> = Vec::new();
+
+        let mut data_chunk_lengths: Vec<usize> = Vec::new();
+        data_chunk_lengths
+            .append(&mut repeat(element_count_per_segment + 1).take(modulo).collect());
+        data_chunk_lengths.append(
+            &mut repeat(element_count_per_segment)
+                .take(segment_size - modulo)
+                .collect(),
+        );
+
+        for chunk_size in data_chunk_lengths {
+            let mut chunk: Vec<T> = iterator.by_ref().take(chunk_size).collect();
+            window_element_counts.push(chunk_size);
+
+            data.append(&mut chunk);
+            data.append(
+                &mut repeat(T::default())
+                    .take(segment_size - chunk_size)
+                    .collect(),
+            );
+        }
+
+        // Calculate the PMA and segment bounds from the density bounds
+        let pma_size = data.len();
+        let pma_bounds: Range<usize> = (pma_density_bounds.start * pma_size as f64) as usize
+            ..(pma_density_bounds.end * pma_size as f64) as usize;
+        let segment_bounds: Range<usize> = (segment_density_bounds.start * segment_size as f64)
+            as usize
+            ..(segment_density_bounds.end * segment_size as f64) as usize;
+
+        // Calculate the window bounds
+        let height = ((pma_size / segment_size) as f64).log2() as usize;
+        let mut bounds: Vec<Range<usize>> = Vec::new();
+
+        bounds.push(segment_bounds);
+
+        for i in 1..height {
+            let window_size = 2usize.pow(i as u32) * segment_size;
+            let start = pma_density_bounds.start
+                + ((segment_density_bounds.start - pma_density_bounds.start)
+                    * ((height - i) / height) as f64);
+            let start = (start * window_size as f64) as usize;
+
+            let end = pma_density_bounds.end
+                + ((segment_density_bounds.end - pma_density_bounds.end)
+                    * ((height - i) / height) as f64);
+            let end = (end * window_size as f64) as usize;
+
+            bounds.push(start..end);
+        }
+
+        bounds.push(pma_bounds);
+
+        // Calculate the amount of data in each window, from the segment to the whole
+        // PMA.
+        let mut consecutive_window_counts = vec![window_element_counts];
+
+        for _ in 0..height {
+            let window_counts: Vec<usize> = consecutive_window_counts
+                .last()
+                .unwrap()
+                .chunks(2)
+                .map(|x| x.iter().sum())
+                .collect();
+            consecutive_window_counts.push(window_counts);
+        }
+
+        let element_counts = consecutive_window_counts.into_iter().flatten().collect();
+
+        PMA {
+            data,
+            bounds,
+            segment_size,
+            element_counts,
+        }
+    }
+
+    /// Returns the number of non-gap elements in the structure.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(pma.element_count(), 15);
+    /// ```
+    pub fn element_count(&self) -> usize {
+        *self.element_counts.last().unwrap()
+    }
+
+    pub fn get(&self, segment: usize, index: usize) -> &T {
+        debug_assert!(index < self.element_counts[segment]);
+        &self.data[segment * self.segment_size + index]
+    }
+
+    fn pma_bounds(&self) -> &Range<usize> {
+        self.bounds.last().unwrap()
+    }
+
+    fn segment_bounds(&self) -> &Range<usize> {
+        self.bounds.get(0).unwrap()
+    }
+
+    #[inline]
+    fn segment_count(&self) -> usize {
+        self.data.len() / self.segment_size
+    }
+
+    pub fn segment(&self, segment: usize) -> impl Iterator<Item = &T> {
+        let start = segment * self.segment_size;
+        let end = start + self.element_counts[segment];
+        (&self.data[start..end]).iter()
+    }
+
+    pub fn window(&self, window: Range<usize>) -> Window<T> {
+        Window {
+            pma: &self,
+            segments_range: window,
+            current_index: 0,
+            end_index: self.segment_size,
+        }
+        //window.into_par_iter().flat_map(move |i| self.segment(i))
+    }
+
+    fn find_segment(&self, element: &T) -> usize {
+        let result = std::iter::successors(Some(0..self.data.len() / self.segment_size), |r| {
+            if r.len() == 0 {
+                None
+            } else {
+                let middle = (r.start + r.end) / 2;
+                let segment: Vec<&T> = self.segment(middle).collect();
+
+                let (first, last) = (segment.get(0).unwrap(), segment.last().unwrap());
+
+                if *last < element {
+                    Some(middle + 1..r.end)
+                } else if *first > element {
+                    Some(r.start..middle - 1)
+                } else {
+                    Some(middle..middle)
+                }
+            }
+        })
+        .last()
+        .unwrap()
+        .start;
+
+        std::cmp::min(result, self.segment_count() - 1)
+    }
+
+    pub fn elements(&self) -> Window<T> {
+        self.window(0..self.segment_count())
+    }
+
+    fn check_segment_density(&self, segment: usize) -> Ordering {
+        let bounds = self.segment_bounds();
+        let size = self.segment(segment).count();
+
+        if size < bounds.start {
+            Ordering::Less
+        } else if size >= bounds.end {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }
+
+    fn check_window_density(&self, window: Range<usize>) -> Ordering {
+        let height = (window.len() as f64).log2() as usize;
+        let bounds = self.bounds.get(height).unwrap();
+        let size = self.window(window).count();
+
+        if size < bounds.start {
+            Ordering::Less
+        } else if size > bounds.end {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }
+
+    fn check_pma_density(&self) -> Ordering {
+        self.check_window_density(0..self.segment_count())
+    }
+
+    fn find_stable_window(&self, segment: usize) -> Option<Range<usize>> {
+        // The idea is to use binary logic on the segment index to find the range.
+        // Masking each bit from the least significant to the most significant, we get
+        // the successive windows to check. For example, if the tree has a height of 3
+        // (8 segments, 0 to 7), and the segment n°5 (0b101) doesn't respect the bounds,
+        // then we have :
+        // - 0b10x (masking the LSB) gives the range [5..=6]
+        // - 0b1xx (masking the second bit) gives the range [4..=7]
+        // - 0bxxx (masking all the bits) gives the range [0..=7]
+
+        let bits = (self.segment_count() as f64).log2() as usize;
+
+        for i in 1..=bits {
+            let mut mask = 2usize.pow((bits - i) as u32) - 1;
+            mask <<= i;
+
+            let start = segment & mask;
+            let end = start + 2usize.pow(i as u32) - 1;
+
+            let elements_in_window = self.window(start..end + 1).count();
+
+            let bounds = self.bounds.get(i).unwrap();
+
+            if bounds.contains(&elements_in_window) {
+                return Some(start..end + 1);
+            }
+        }
+
+        None
+    }
+
+    fn rebalance(&mut self, window: Range<usize>) {
+        // Get the indexes of all the elements in the window
+        let mut indices: Vec<usize> = Vec::new();
+
+        for (size, i) in self.element_counts[window.clone()]
+            .iter()
+            .zip(window.clone())
+        {
+            indices.append(&mut (i * self.segment_size..i * self.segment_size + size).collect())
+        }
+
+        let slice = self.data.as_mut_slice();
+
+        // Shift all elements of the window on the left
+        for (i, j) in indices.iter().enumerate() {
+            slice.swap(i, *j);
+        }
+
+        let number_of_elements = indices.len();
+        let number_of_segments = window.len();
+
+        let elements_per_segment = number_of_elements / number_of_segments;
+        let mut leftovers = number_of_elements % number_of_segments;
+
+        let mut new_data_indexes: Vec<usize> = vec![];
+
+        let element_counts_slice = self.element_counts.as_mut_slice();
+
+        // Calculate the new indexes of the element, to be put in the stabilized array
+        for i in 0..number_of_segments {
+            let start = window.start + (i * self.segment_size);
+            let mut end = window.start + (i * self.segment_size) + elements_per_segment;
+            if leftovers > 0 {
+                end += 1;
+                leftovers -= 1;
+            }
+
+            element_counts_slice[window.start + i] = (start..end).len();
+
+            new_data_indexes.append(&mut (start..end).collect::<Vec<usize>>())
+        }
+
+        let _ = (0..number_of_elements)
+            .rev()
+            .zip(new_data_indexes.iter().rev())
+            .map(|(i, j)| {
+                slice.swap(*j, i);
+            })
+            .collect::<Vec<()>>();
+        self.update_window_sizes();
+    }
+
+    fn double_size(&mut self) {
+        let element_count = self.element_counts.last().unwrap();
+        let segment_count = self.segment_count() * 2;
+
+        debug_assert_eq!(
+            *self.element_counts.last().unwrap(),
+            self.elements().count()
+        );
+
+        let elements_per_segment = element_count / segment_count;
+        let modulo = element_count % segment_count;
+
+        let sizes_iterator = repeat(elements_per_segment + 1)
+            .take(modulo)
+            .chain(repeat(elements_per_segment).take(segment_count - modulo));
+
+        let mut data: Vec<T> = Vec::with_capacity(segment_count * self.segment_size);
+
+        unsafe {
+            data.set_len(segment_count * self.segment_size);
+        }
+
+        for (i, e) in sizes_iterator
+            .enumerate()
+            .flat_map(|(i, t)| (i * self.segment_size)..(i * self.segment_size + t))
+            .zip(self.elements())
+        {
+            data[i] = unsafe { std::ptr::read(e as *const T) };
+        }
+
+        /*
+        let data: Vec<T> = size_iterator
+            .scan(element_iterator, |i, t| {
+                let i_left = i.divide_on_left_at(t);
+                let i_left = i_left.cloned();
+                Some(i_left.chain(repeat(T::default()).take(self.segment_size - t)))
+            })
+            .flatten()
+            .collect();
+        */
+        self.data = data;
+    }
+
+    fn update_window_sizes(&mut self) {
+        // Calculate the amount of data in each window, from the segment to the whole
+        // PMA.
+        let height = (self.segment_count() as f64).log2() as usize;
+
+        let window_element_counts: Vec<usize> = self
+            .element_counts
+            .iter()
+            .take(self.segment_count())
+            .copied()
+            .collect();
+
+        let mut consecutive_window_counts = vec![window_element_counts];
+
+        for _ in 0..height {
+            let window_counts: Vec<usize> = consecutive_window_counts
+                .last()
+                .unwrap()
+                .chunks(2)
+                .map(|x| x.iter().sum())
+                .collect();
+            consecutive_window_counts.push(window_counts);
+        }
+
+        let element_counts: Vec<usize> = consecutive_window_counts.into_iter().flatten().collect();
+        self.element_counts = element_counts;
+    }
+
+    pub fn insert(&mut self, mut element: T) {
+        let segment = self.find_segment(&element);
+
+        if let Ordering::Equal = self.check_segment_density(segment) {
+            let start = segment * self.segment_size;
+            let end = start + self.element_counts.get(segment).unwrap();
+
+            let index: usize = std::iter::successors(Some(start..end), |r| {
+                if r.len() == 0 {
+                    None
+                } else {
+                    let middle = (r.start + r.end) / 2;
+                    if self.data[middle] > element {
+                        Some(r.start..(middle - 1))
+                    } else if self.data[middle] < element {
+                        Some((middle + 1)..r.end)
+                    } else {
+                        Some(middle..middle)
+                    }
+                }
+            })
+            .last()
+            .unwrap()
+            .start;
+
+            let current_count = *self.element_counts.get(segment).unwrap();
+
+            for i in index..=(segment * self.segment_size) + current_count {
+                std::mem::swap(&mut self.data[i], &mut element);
+            }
+
+            self.element_counts.as_mut_slice()[segment] = current_count + 1;
+            self.update_window_sizes();
+
+            debug_assert_eq!(
+                *self.element_counts.last().unwrap(),
+                self.elements().count()
+            );
+        } else {
+            if let Some(window) = self.find_stable_window(segment) {
+                // Rebalance window
+                self.rebalance(window);
+            } else {
+                // Double the PMA
+                self.double_size();
+                self.update_window_sizes();
+                self.rebalance(0..self.segment_count() - 1);
+            }
+            self.insert(element);
+        }
+    }
+}
