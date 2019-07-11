@@ -1,98 +1,7 @@
-extern crate rayon_adaptive;
-use rayon_adaptive::prelude::*;
-
-use rayon_adaptive::IndexedPower;
+use crate::window::Window;
 use std::cmp::Ordering;
 use std::iter::repeat;
-use std::iter::Filter;
-use std::ops::{Index, Range};
-use std::slice::SliceIndex;
-use std::vec::IntoIter;
-
-#[derive(Debug)]
-pub struct Window<'a, T> {
-    pma: &'a PMA<T>,
-    segments_range: Range<usize>,
-    current_index: usize,
-    end_index: usize,
-}
-
-impl<'a, T> Iterator for Window<'a, T> {
-    type Item = &'a T;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.segments_range.start == self.segments_range.end
-            || (self.segments_range.len() == 1 && self.current_index == self.end_index)
-        {
-            None
-        } else {
-            let t = Some(
-                &self.pma.data
-                    [self.segments_range.start * self.pma.segment_size + self.current_index],
-            );
-            self.current_index += 1;
-
-            if self.current_index == self.pma.element_counts[self.segments_range.start] {
-                self.current_index = 0;
-                self.segments_range.start += 1;
-            }
-            t
-        }
-    }
-}
-
-impl<'a, T: std::fmt::Debug> Divisible for Window<'a, T> {
-    type Power = IndexedPower;
-    fn base_length(&self) -> Option<usize> {
-        let range = &self.segments_range;
-
-        let mut length = self.pma.element_counts[range.start..(range.end - 1)]
-            .iter()
-            .sum();
-
-        length += self.end_index;
-        length -= self.current_index;
-        Some(length)
-    }
-
-    fn divide_at(mut self, index: usize) -> (Self, Self) {
-        let (segment_index, sum) = self
-            .segments_range
-            .clone()
-            .scan(-(self.current_index as isize), |current_sum, index| {
-                *current_sum += (self.pma.element_counts[index]
-                    - if index == self.segments_range.end {
-                        self.end_index
-                    } else {
-                        0
-                    }) as isize;
-                Some(*current_sum)
-            })
-            .map(|s| s as usize)
-            .enumerate()
-            .find(|&(_, s)| s >= index)
-            .unwrap();
-
-        let end = (index + self.pma.element_counts[segment_index]) - sum;
-
-        let mut right = Window {
-            pma: self.pma,
-            segments_range: segment_index..self.segments_range.end,
-            current_index: end,
-            end_index: self.end_index,
-        };
-
-        if self.pma.element_counts[segment_index] == end {
-            right.current_index = 0;
-            right.segments_range.start += 1;
-        }
-
-        self.segments_range.end = segment_index + 1;
-
-        self.end_index = end;
-
-        (self, right)
-    }
-}
+use std::ops::Range;
 
 /// A Packed-Memory Array structure implementation, which keeps gaps in the
 /// underlying vector to enable fast insertion in the structure.
@@ -122,9 +31,9 @@ impl<'a, T: std::fmt::Debug> Divisible for Window<'a, T> {
 #[derive(Debug)]
 pub struct PMA<T> {
     pub data: Vec<T>,
-    bounds: Vec<Range<usize>>,
-    segment_size: usize,
-    element_counts: Vec<usize>,
+    pub(crate) bounds: Vec<Range<usize>>,
+    pub(crate) segment_size: usize,
+    pub(crate) element_counts: Vec<usize>,
 }
 
 impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
@@ -252,19 +161,35 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     ///
     /// # Example
     /// ```
-    /// use pma::PMA;
+    /// use pma::pma::PMA;
     ///
-    /// let pma = PMA::from_iterator(0u32..15, 0.3..0.7, 0.08..0.92, 8);
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
     ///
-    /// assert_eq!(pma.element_count(), 15);
+    /// assert_eq!(pma.element_count(), 32);
     /// ```
     pub fn element_count(&self) -> usize {
         *self.element_counts.last().unwrap()
     }
 
-    pub fn get(&self, segment: usize, index: usize) -> &T {
-        debug_assert!(index < self.element_counts[segment]);
-        &self.data[segment * self.segment_size + index]
+    /// Safely get an element from a segment by its index. If the index is invalid
+    /// (i.e. is a gap or out of bounds), it will return a None value. Otherwise, the
+    /// function will return an option containing the reference to the element.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(pma.get(0, 2), Some(&2));
+    /// assert_eq!(pma.get(0, 7), None);
+    /// ```
+    pub fn get(&self, segment: usize, index: usize) -> Option<&T> {
+        if index < self.element_counts[segment] {
+            Some(&self.data[segment * self.segment_size + index])
+        } else {
+            None
+        }
     }
 
     fn pma_bounds(&self) -> &Range<usize> {
@@ -280,12 +205,38 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         self.data.len() / self.segment_size
     }
 
+    /// Returns the valid elements inside a segment as an iterator
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// let first_segment = pma.segment(0).collect::<Vec<&u32>>();
+    ///
+    /// assert_eq!(first_segment, [&0, &1, &2, &3]);
+    /// ```
     pub fn segment(&self, segment: usize) -> impl Iterator<Item = &T> {
         let start = segment * self.segment_size;
         let end = start + self.element_counts[segment];
         (&self.data[start..end]).iter()
     }
 
+    /// Returns an iterator over the valid elements contained in the
+    /// window (a range of segments).
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// let window = pma.window(0..4).collect::<Vec<&u32>>();
+    /// let expected_result = (0..16).collect::<Vec<u32>>();
+    ///
+    /// assert_eq!(window, expected_result.iter().collect::<Vec<&u32>>());
+    /// ```
     pub fn window(&self, window: Range<usize>) -> Window<T> {
         Window {
             pma: &self,
@@ -322,6 +273,24 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         std::cmp::min(result, self.segment_count() - 1)
     }
 
+    /// Returns an iterator over the elements in the PMA.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// let mut elements = pma.elements();
+    ///
+    /// assert_eq!(elements.next(), Some(&0));
+    /// assert_eq!(elements.next(), Some(&1));
+    ///
+    /// let mut elements = elements.skip(29);
+    ///
+    /// assert_eq!(elements.next(), Some(&31));
+    /// assert_eq!(elements.next(), None);
+    /// ```
     pub fn elements(&self) -> Window<T> {
         self.window(0..self.segment_count())
     }
@@ -452,9 +421,18 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         let elements_per_segment = element_count / segment_count;
         let modulo = element_count % segment_count;
 
+        // Iterator over the desired sizes of each segment
         let sizes_iterator = repeat(elements_per_segment + 1)
             .take(modulo)
             .chain(repeat(elements_per_segment).take(segment_count - modulo));
+
+        // Same iterator as sizes_iterator, but used to collect into the new element_counts
+        let element_counts: Vec<usize> = repeat(elements_per_segment + 1)
+            .take(modulo)
+            .chain(repeat(elements_per_segment).take(segment_count - modulo))
+            .collect();
+
+        self.element_counts = element_counts;
 
         let mut data: Vec<T> = Vec::with_capacity(segment_count * self.segment_size);
 
@@ -470,16 +448,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             data[i] = unsafe { std::ptr::read(e as *const T) };
         }
 
-        /*
-        let data: Vec<T> = size_iterator
-            .scan(element_iterator, |i, t| {
-                let i_left = i.divide_on_left_at(t);
-                let i_left = i_left.cloned();
-                Some(i_left.chain(repeat(T::default()).take(self.segment_size - t)))
-            })
-            .flatten()
-            .collect();
-        */
         self.data = data;
     }
 
@@ -511,15 +479,36 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         self.element_counts = element_counts;
     }
 
+    /// Inserts an element in the PMA, while maintaining the density bounds of the structure.
+    ///
+    /// If the insertion will cause the PMA to fall out of the density bounds, the insertion
+    /// will trigger beforehand a rebalance of the first stable window. If no stable window is
+    /// found, the whole PMA will double its capacity and trigger a global rebalance. The insertion
+    /// will the take place as expected.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let mut pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(pma.elements().count(), 32);
+    ///
+    /// pma.insert(23);
+    ///
+    /// assert_eq!(pma.elements().count(), 33);
+    /// ```
     pub fn insert(&mut self, mut element: T) {
         let segment = self.find_segment(&element);
 
         if let Ordering::Equal = self.check_segment_density(segment) {
+            // Dichotomy search for position in segment for insertion
             let start = segment * self.segment_size;
             let end = start + self.element_counts.get(segment).unwrap();
 
             let index: usize = std::iter::successors(Some(start..end), |r| {
                 if r.len() == 0 {
+                    // Can't use r.is_empty() because of multiple implementations (??)
                     None
                 } else {
                     let middle = (r.start + r.end) / 2;
@@ -538,6 +527,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
             let current_count = *self.element_counts.get(segment).unwrap();
 
+            // Inserting and shifting elements to the right
             for i in index..=(segment * self.segment_size) + current_count {
                 std::mem::swap(&mut self.data[i], &mut element);
             }
@@ -551,15 +541,14 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             );
         } else {
             if let Some(window) = self.find_stable_window(segment) {
-                // Rebalance window
                 self.rebalance(window);
             } else {
-                // Double the PMA
+                // No suitable window was found, we need to double the size of the PMA
                 self.double_size();
                 self.update_window_sizes();
                 self.rebalance(0..self.segment_count() - 1);
             }
-            self.insert(element);
+            self.insert(element); // Hopefully there is only one recursive call at most
         }
     }
 }
