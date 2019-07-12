@@ -383,7 +383,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             indices.append(&mut (i * segment_size..i * segment_size + size).collect())
         }
 
-        let height = (self.segment_count() as f64).log2() as usize;
+        let height = (window.len() as f64).log2() as usize;
         let slice = self.data.as_mut_slice();
 
         // Shift all elements of the window on the left
@@ -433,19 +433,30 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             self.elements().count()
         );
 
+        let segment_size = self.segment_size;
         let elements_per_segment = element_count / segment_count;
         let modulo = element_count % segment_count;
+        let height = (segment_count as f64).log2() as usize;
 
         // Iterator over the desired sizes of each segment
+        /*
         let sizes_iterator = repeat(elements_per_segment + 1)
             .take(modulo)
             .chain(repeat(elements_per_segment).take(segment_count - modulo));
+         */
 
-        // Same iterator as sizes_iterator, but used to collect into the new element_counts
-        let element_counts: Vec<usize> = repeat(elements_per_segment + 1)
-            .take(modulo)
-            .chain(repeat(elements_per_segment).take(segment_count - modulo))
-            .collect();
+        let mut element_counts: Vec<usize> = Vec::new();
+
+        let sizes_iterator = (0u32..(segment_count as u32))
+            .enumerate()
+            .map(|(segment, i)| {
+                let offset = segment * segment_size;
+                let reversed = i.reverse_bits() >> (32 - height);
+                let range = offset
+                    ..offset + elements_per_segment + if reversed < modulo as u32 { 1 } else { 0 };
+                element_counts.push(range.len());
+                range.len()
+            });
 
         let mut data: Vec<T> = Vec::with_capacity(segment_count * self.segment_size);
 
@@ -547,9 +558,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     /// assert_eq!(pma.elements().count(), 33);
     /// ```
     pub fn insert(&mut self, mut element: T) {
-        eprintln!("Beginning insertion...");
         if self.check_pma_density(1) != Ordering::Equal {
-            eprintln!("\tPMA density not respected, doubling the size");
             self.double_size();
             self.calculate_bounds();
             self.update_window_sizes();
@@ -558,7 +567,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
         let segment = self.find_segment(&element);
 
-        eprintln!("\tEvery density bound respected, beginning insertion...");
         // Dichotomy search for position in segment for insertion
         let start = segment * self.segment_size;
         let end = start + self.element_counts.get(segment).unwrap();
@@ -594,10 +602,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
         // Rebalance check
         if let Some(window) = self.find_stable_window(segment, 0) {
-            eprintln!(
-                "\tA window under {:?} does not respect density bounds, rebalancing...",
-                window
-            );
             self.rebalance(window);
         }
     }
