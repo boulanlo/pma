@@ -373,15 +373,17 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         // Get the indexes of all the elements in the window
         let mut indices: Vec<usize> = Vec::new();
 
-        let offset = window.start * self.segment_size;
+        let segment_size = self.segment_size;
+        let offset = window.start * segment_size;
 
         for (size, i) in self.element_counts[window.clone()]
             .iter()
             .zip(window.clone())
         {
-            indices.append(&mut (i * self.segment_size..i * self.segment_size + size).collect())
+            indices.append(&mut (i * segment_size..i * segment_size + size).collect())
         }
 
+        let height = (self.segment_count() as f64).log2() as usize;
         let slice = self.data.as_mut_slice();
 
         // Shift all elements of the window on the left
@@ -393,33 +395,31 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         let number_of_segments = window.len();
 
         let elements_per_segment = number_of_elements / number_of_segments;
-        let mut leftovers = number_of_elements % number_of_segments;
-
-        let mut new_data_indexes: Vec<usize> = vec![];
+        let leftovers = number_of_elements % number_of_segments;
 
         let element_counts_slice = self.element_counts.as_mut_slice();
 
-        // Calculate the new indexes of the element, to be put in the stabilized array
-        for i in 0..number_of_segments {
-            let start = (window.start + i) * self.segment_size;
-            let mut end = (window.start + i) * self.segment_size + elements_per_segment;
-            if leftovers > 0 {
-                end += 1;
-                leftovers -= 1;
-            }
-
-            element_counts_slice[window.start + i] = (start..end).len();
-
-            new_data_indexes.append(&mut (start..end).collect::<Vec<usize>>())
-        }
+        let indexes_iterator = (0u32..(number_of_segments as u32))
+            .zip(window.clone())
+            .flat_map(|(i, segment)| {
+                let offset = segment * segment_size;
+                let reversed = i.reverse_bits() >> (32 - height);
+                let range = offset
+                    ..offset
+                        + elements_per_segment
+                        + if reversed < leftovers as u32 { 1 } else { 0 };
+                element_counts_slice[window.start + i as usize] = range.len(); // Update the sizes
+                range
+            });
 
         let _ = (0..number_of_elements)
             .rev()
-            .zip(new_data_indexes.iter().rev())
+            .zip(indexes_iterator.rev())
             .map(|(i, j)| {
-                slice.swap(*j, i + offset);
+                slice.swap(j, i + offset);
             })
             .collect::<Vec<()>>();
+
         self.update_window_sizes();
     }
 
@@ -527,76 +527,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         self.bounds = bounds;
     }
 
-    // ugly fix for infinite rebalance loop
-    fn perform_insert(&mut self, mut element: T, recursion_level: usize) {
-        if self.check_pma_density(1) != Ordering::Equal {
-            eprintln!("\tPMA density not respected, doubling the size");
-            self.double_size();
-            self.calculate_bounds();
-            self.update_window_sizes();
-            self.rebalance(0..self.segment_count());
-        }
-
-        let segment = self.find_segment(&element);
-
-        if let Some(window) = self.find_stable_window(segment, 1) {
-            if recursion_level == 0 {
-                eprintln!(
-                    "\tA window under {:?} does not respect density bounds, rebalancing...",
-                    window
-                );
-                self.rebalance(window);
-                self.perform_insert(element, recursion_level + 1);
-            } else {
-                eprintln!("\tRebalance loop detected, doubling the size");
-                self.double_size();
-                self.calculate_bounds();
-                self.update_window_sizes();
-                self.rebalance(0..self.segment_count());
-            }
-        } else {
-            eprintln!("\tEvery density bound respected, beginning insertion...");
-            // Dichotomy search for position in segment for insertion
-            let start = segment * self.segment_size;
-            let end = start + self.element_counts.get(segment).unwrap();
-
-            let index: usize = std::iter::successors(Some(start..end), |r| {
-                if r.len() == 0 {
-                    // Can't use r.is_empty() because of multiple implementations (??)
-                    None
-                } else {
-                    let middle = (r.start + r.end) / 2;
-                    if self.data[middle] > element {
-                        Some(r.start..(middle - 1))
-                    } else if self.data[middle] < element {
-                        Some((middle + 1)..r.end)
-                    } else {
-                        Some(middle..middle)
-                    }
-                }
-            })
-            .last()
-            .unwrap()
-            .start;
-
-            let current_count = *self.element_counts.get(segment).unwrap();
-
-            // Inserting and shifting elements to the right
-            for i in index..=(segment * self.segment_size) + current_count {
-                std::mem::swap(&mut self.data[i], &mut element);
-            }
-
-            self.element_counts.as_mut_slice()[segment] = current_count + 1;
-            self.update_window_sizes();
-
-            debug_assert_eq!(
-                *self.element_counts.last().unwrap(),
-                self.elements().count()
-            );
-            debug_assert_eq!(self.check_pma_density(0), Ordering::Equal);
-        }
-    }
-
     /// Inserts an element in the PMA, while maintaining the density bounds of the structure.
     ///
     /// If the insertion will cause the PMA to fall out of the density bounds, the insertion
@@ -616,10 +546,60 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     ///
     /// assert_eq!(pma.elements().count(), 33);
     /// ```
-    pub fn insert(&mut self, element: T) {
+    pub fn insert(&mut self, mut element: T) {
         eprintln!("Beginning insertion...");
+        if self.check_pma_density(1) != Ordering::Equal {
+            eprintln!("\tPMA density not respected, doubling the size");
+            self.double_size();
+            self.calculate_bounds();
+            self.update_window_sizes();
+            self.rebalance(0..self.segment_count());
+        }
 
-        self.perform_insert(element, 0);
+        let segment = self.find_segment(&element);
+
+        eprintln!("\tEvery density bound respected, beginning insertion...");
+        // Dichotomy search for position in segment for insertion
+        let start = segment * self.segment_size;
+        let end = start + self.element_counts.get(segment).unwrap();
+
+        let index: usize = std::iter::successors(Some(start..end), |r| {
+            if r.len() == 0 {
+                // Can't use r.is_empty() because of multiple implementations (??)
+                None
+            } else {
+                let middle = (r.start + r.end) / 2;
+                if self.data[middle] > element {
+                    Some(r.start..(middle - 1))
+                } else if self.data[middle] < element {
+                    Some((middle + 1)..r.end)
+                } else {
+                    Some(middle..middle)
+                }
+            }
+        })
+        .last()
+        .unwrap()
+        .start;
+
+        let current_count = *self.element_counts.get(segment).unwrap();
+
+        // Inserting and shifting elements to the right
+        for i in index..=(segment * self.segment_size) + current_count {
+            std::mem::swap(&mut self.data[i], &mut element);
+        }
+
+        self.element_counts.as_mut_slice()[segment] = current_count + 1;
+        self.update_window_sizes();
+
+        // Rebalance check
+        if let Some(window) = self.find_stable_window(segment, 0) {
+            eprintln!(
+                "\tA window under {:?} does not respect density bounds, rebalancing...",
+                window
+            );
+            self.rebalance(window);
+        }
     }
 
     pub fn insert_bulk(&mut self, elements: Vec<T>) {}
