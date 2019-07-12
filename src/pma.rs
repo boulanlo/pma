@@ -1,4 +1,5 @@
 use crate::window::Window;
+use itertools::Itertools;
 use std::cmp::Ordering;
 use std::iter::repeat;
 use std::ops::Range;
@@ -106,11 +107,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
         // Calculate the PMA and segment bounds from the density bounds
         let pma_size = data.len();
-        let pma_bounds: Range<usize> = (pma_density_bounds.start * pma_size as f64) as usize
-            ..(pma_density_bounds.end * pma_size as f64) as usize;
+        let pma_bounds: Range<usize> = (pma_density_bounds.start * pma_size as f64).round() as usize
+            ..(pma_density_bounds.end * pma_size as f64).round() as usize;
         let segment_bounds: Range<usize> = (segment_density_bounds.start * segment_size as f64)
-            as usize
-            ..(segment_density_bounds.end * segment_size as f64) as usize;
+            .round() as usize
+            ..(segment_density_bounds.end * segment_size as f64).round() as usize;
 
         // Calculate the window bounds
         let height = ((pma_size / segment_size) as f64).log2() as usize;
@@ -123,12 +124,12 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             let start = pma_density_bounds.start
                 + ((segment_density_bounds.start - pma_density_bounds.start)
                     * ((height - i) / height) as f64);
-            let start = (start * window_size as f64) as usize;
+            let start = (start * window_size as f64).round() as usize;
 
             let end = pma_density_bounds.end
                 + ((segment_density_bounds.end - pma_density_bounds.end)
                     * ((height - i) / height) as f64);
-            let end = (end * window_size as f64) as usize;
+            let end = (end * window_size as f64).round() as usize;
 
             bounds.push(start..end);
         }
@@ -299,9 +300,9 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         self.window(0..self.segment_count())
     }
 
-    fn check_segment_density(&self, segment: usize) -> Ordering {
+    fn check_segment_density(&self, segment: usize, increment: usize) -> Ordering {
         let bounds = self.segment_bounds();
-        let size = self.segment(segment).count();
+        let size = self.segment(segment).count() + increment;
 
         if size < bounds.start {
             Ordering::Less
@@ -312,10 +313,14 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         }
     }
 
-    fn check_window_density(&self, window: Range<usize>) -> Ordering {
+    fn check_window_density(&self, window: Range<usize>, increment: usize) -> Ordering {
+        dbg!(&window);
         let height = (window.len() as f64).log2() as usize;
         let bounds = self.bounds.get(height).unwrap();
-        let size = self.window(window).count();
+        let size = self.window(window).count() + increment;
+
+        dbg!(size);
+        dbg!(bounds);
 
         if size < bounds.start {
             Ordering::Less
@@ -326,47 +331,49 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         }
     }
 
-    fn check_pma_density(&self) -> Ordering {
-        self.check_window_density(0..self.segment_count())
+    fn check_pma_density(&self, increment: usize) -> Ordering {
+        self.check_window_density(0..self.segment_count(), increment)
     }
 
     pub fn pma_density(&self) -> f64 {
         self.elements().count() as f64 / self.data.len() as f64
     }
 
-    fn find_stable_window(&self, segment: usize) -> Option<Range<usize>> {
+    fn find_stable_window(&self, segment: usize, inserted_size: usize) -> Option<Range<usize>> {
         // The idea is to use binary logic on the segment index to find the range.
-        // Masking each bit from the least significant to the most significant, we get
+        // Masking each bit from the most significant to the least significant, we get
         // the successive windows to check. For example, if the tree has a height of 3
         // (8 segments, 0 to 7), and the segment n°5 (0b101) doesn't respect the bounds,
         // then we have :
-        // - 0b10x (masking the LSB) gives the range [5..=6]
-        // - 0b1xx (masking the second bit) gives the range [4..=7]
         // - 0bxxx (masking all the bits) gives the range [0..=7]
+        // - 0b1xx (masking the second bit) gives the range [4..=7]
+        // - 0b10x (masking the LSB) gives the range [5..=6]
+
+        // Precondition : the PMA is stable at the highest level
 
         let bits = (self.segment_count() as f64).log2() as usize;
 
-        for i in 1..=bits {
-            let mut mask = 2usize.pow((bits - i) as u32) - 1;
-            mask <<= i;
+        (0..=bits)
+            .rev()
+            .map(|i| {
+                let mut mask = 2usize.pow((bits - i) as u32) - 1;
+                mask <<= i;
 
-            let start = segment & mask;
-            let end = start + 2usize.pow(i as u32) - 1;
+                let start = segment & mask;
+                let end = start + 2usize.pow(i as u32);
 
-            let elements_in_window = self.window(start..end + 1).count();
-
-            let bounds = self.bounds.get(i).unwrap();
-
-            if bounds.contains(&elements_in_window) {
-                return Some(start..end + 1);
-            }
-        }
-
-        None
+                start..end
+            })
+            .tuple_windows()
+            .find(|(_, window)| {
+                self.check_window_density(window.clone(), inserted_size) != Ordering::Equal
+            })
+            .map(|(x, _)| x)
     }
 
     fn rebalance(&mut self, window: Range<usize>) {
-        eprintln!("rebalance {:?}", window);
+        // idée : prendre en compte l'élément à insérer pour éviter les boucles infinies
+
         // Get the indexes of all the elements in the window
         let mut indices: Vec<usize> = Vec::new();
 
@@ -523,29 +530,35 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         self.bounds = bounds;
     }
 
-    /// Inserts an element in the PMA, while maintaining the density bounds of the structure.
-    ///
-    /// If the insertion will cause the PMA to fall out of the density bounds, the insertion
-    /// will trigger beforehand a rebalance of the first stable window. If no stable window is
-    /// found, the whole PMA will double its capacity and trigger a global rebalance. The insertion
-    /// will the take place as expected.
-    ///
-    /// # Example
-    /// ```
-    /// use pma::pma::PMA;
-    ///
-    /// let mut pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
-    ///
-    /// assert_eq!(pma.elements().count(), 32);
-    ///
-    /// pma.insert(23);
-    ///
-    /// assert_eq!(pma.elements().count(), 33);
-    /// ```
-    pub fn insert(&mut self, mut element: T) {
+    // ugly fix for infinite rebalance loop
+    fn perform_insert(&mut self, mut element: T, recursion_level: usize) {
+        if self.check_pma_density(1) != Ordering::Equal {
+            eprintln!("\tPMA density not respected, doubling the size");
+            self.double_size();
+            self.calculate_bounds();
+            self.update_window_sizes();
+            self.rebalance(0..self.segment_count());
+        }
+
         let segment = self.find_segment(&element);
 
-        if let Ordering::Equal = self.check_segment_density(segment) {
+        if let Some(window) = self.find_stable_window(segment, 1) {
+            if recursion_level == 0 {
+                eprintln!(
+                    "\tA window under {:?} does not respect density bounds, rebalancing...",
+                    window
+                );
+                self.rebalance(window);
+                self.perform_insert(element, recursion_level + 1);
+            } else {
+                eprintln!("\tRebalance loop detected, doubling the size");
+                self.double_size();
+                self.calculate_bounds();
+                self.update_window_sizes();
+                self.rebalance(0..self.segment_count());
+            }
+        } else {
+            eprintln!("\tEvery density bound respected, beginning insertion...");
             // Dichotomy search for position in segment for insertion
             let start = segment * self.segment_size;
             let end = start + self.element_counts.get(segment).unwrap();
@@ -583,20 +596,33 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
                 *self.element_counts.last().unwrap(),
                 self.elements().count()
             );
-
-            debug_assert_eq!(self.check_pma_density(), Ordering::Equal);
-        } else {
-            if let Some(window) = self.find_stable_window(segment) {
-                self.rebalance(window);
-            } else {
-                // No suitable window was found, we need to double the size of the PMA
-                self.double_size();
-                self.calculate_bounds();
-                self.update_window_sizes();
-                self.rebalance(0..self.segment_count());
-            }
-            self.insert(element); // Hopefully there is only one recursive call at most
+            debug_assert_eq!(self.check_pma_density(0), Ordering::Equal);
         }
+    }
+
+    /// Inserts an element in the PMA, while maintaining the density bounds of the structure.
+    ///
+    /// If the insertion will cause the PMA to fall out of the density bounds, the insertion
+    /// will trigger beforehand a rebalance of the first stable window. If no stable window is
+    /// found, the whole PMA will double its capacity and trigger a global rebalance. The insertion
+    /// will the take place as expected.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let mut pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(pma.elements().count(), 32);
+    ///
+    /// pma.insert(23);
+    ///
+    /// assert_eq!(pma.elements().count(), 33);
+    /// ```
+    pub fn insert(&mut self, mut element: T) {
+        eprintln!("Beginning insertion...");
+
+        self.perform_insert(element, 0);
     }
 
     pub fn insert_bulk(&mut self, elements: Vec<T>) {}
