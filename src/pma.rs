@@ -314,13 +314,9 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     }
 
     fn check_window_density(&self, window: Range<usize>, increment: usize) -> Ordering {
-        dbg!(&window);
         let height = (window.len() as f64).log2() as usize;
         let bounds = self.bounds.get(height).unwrap();
         let size = self.window(window).count() + increment;
-
-        dbg!(size);
-        dbg!(bounds);
 
         if size < bounds.start {
             Ordering::Less
@@ -377,6 +373,8 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         // Get the indexes of all the elements in the window
         let mut indices: Vec<usize> = Vec::new();
 
+        let offset = window.start * self.segment_size;
+
         for (size, i) in self.element_counts[window.clone()]
             .iter()
             .zip(window.clone())
@@ -388,7 +386,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
         // Shift all elements of the window on the left
         for (i, j) in indices.iter().enumerate() {
-            slice.swap(i, *j);
+            slice.swap(offset + i, *j);
         }
 
         let number_of_elements = indices.len();
@@ -403,8 +401,8 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
         // Calculate the new indexes of the element, to be put in the stabilized array
         for i in 0..number_of_segments {
-            let start = window.start + (i * self.segment_size);
-            let mut end = window.start + (i * self.segment_size) + elements_per_segment;
+            let start = (window.start + i) * self.segment_size;
+            let mut end = (window.start + i) * self.segment_size + elements_per_segment;
             if leftovers > 0 {
                 end += 1;
                 leftovers -= 1;
@@ -419,7 +417,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             .rev()
             .zip(new_data_indexes.iter().rev())
             .map(|(i, j)| {
-                slice.swap(*j, i);
+                slice.swap(*j, i + offset);
             })
             .collect::<Vec<()>>();
         self.update_window_sizes();
@@ -449,8 +447,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             .chain(repeat(elements_per_segment).take(segment_count - modulo))
             .collect();
 
-        self.element_counts = element_counts;
-
         let mut data: Vec<T> = Vec::with_capacity(segment_count * self.segment_size);
 
         unsafe {
@@ -465,6 +461,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             data[i] = unsafe { std::ptr::read(e as *const T) };
         }
 
+        self.element_counts = element_counts;
         self.data = data;
     }
 
@@ -619,7 +616,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     ///
     /// assert_eq!(pma.elements().count(), 33);
     /// ```
-    pub fn insert(&mut self, mut element: T) {
+    pub fn insert(&mut self, element: T) {
         eprintln!("Beginning insertion...");
 
         self.perform_insert(element, 0);
