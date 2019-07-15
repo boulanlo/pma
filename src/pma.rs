@@ -1,6 +1,7 @@
 use crate::window::Window;
 use itertools::Itertools;
 use std::cmp::Ordering;
+use std::iter::once;
 use std::iter::repeat;
 use std::ops::Range;
 
@@ -371,27 +372,22 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         // idée : prendre en compte l'élément à insérer pour éviter les boucles infinies
 
         // Get the indexes of all the elements in the window
-        let mut indices: Vec<usize> = Vec::new();
-
         let segment_size = self.segment_size;
         let offset = window.start * segment_size;
-
-        for (size, i) in self.element_counts[window.clone()]
-            .iter()
-            .zip(window.clone())
-        {
-            indices.append(&mut (i * segment_size..i * segment_size + size).collect())
-        }
-
         let height = (window.len() as f64).log2() as usize;
         let slice = self.data.as_mut_slice();
+        let mut number_of_elements = 0;
 
-        // Shift all elements of the window on the left
-        for (i, j) in indices.iter().enumerate() {
-            slice.swap(offset + i, *j);
+        for (i, j) in self.element_counts[window.clone()]
+            .iter()
+            .zip(window.clone())
+            .flat_map(|(size, i)| i * segment_size..i * segment_size + size)
+            .enumerate()
+        {
+            slice.swap(offset + i, j);
+            number_of_elements += 1;
         }
 
-        let number_of_elements = indices.len();
         let number_of_segments = window.len();
 
         let elements_per_segment = number_of_elements / number_of_segments;
@@ -412,13 +408,9 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
                 range
             });
 
-        let _ = (0..number_of_elements)
-            .rev()
-            .zip(indexes_iterator.rev())
-            .map(|(i, j)| {
-                slice.swap(j, i + offset);
-            })
-            .collect::<Vec<()>>();
+        for (i, j) in (0..number_of_elements).rev().zip(indexes_iterator.rev()) {
+            slice.swap(j, i + offset);
+        }
 
         self.update_window_sizes();
     }
@@ -562,7 +554,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             self.double_size();
             self.calculate_bounds();
             self.update_window_sizes();
-            self.rebalance(0..self.segment_count());
         }
 
         let segment = self.find_segment(&element);
@@ -572,8 +563,8 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         let end = start + self.element_counts.get(segment).unwrap();
 
         let index: usize = std::iter::successors(Some(start..end), |r| {
+            // Can't use r.is_empty() because of multiple implementations (??)
             if r.len() == 0 {
-                // Can't use r.is_empty() because of multiple implementations (??)
                 None
             } else {
                 let middle = (r.start + r.end) / 2;
@@ -604,7 +595,94 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         if let Some(window) = self.find_stable_window(segment, 0) {
             self.rebalance(window);
         }
+
+        debug_assert_eq!(self.check_pma_density(0), Ordering::Equal);
     }
 
-    pub fn insert_bulk(&mut self, elements: Vec<T>) {}
+    fn perform_insert_bulk(&mut self, elements: Vec<T>, window: Range<usize>) {
+        // Find the pivot : first element of right window
+        dbg!(&window);
+        if window.len() < 2 {
+            eprintln!("Fin de récursion");
+
+            dbg!(elements.len());
+            dbg!(self.segment(window.start).count());
+        } else {
+            let number_of_elements = elements.len();
+            let segment_size = self.segment_size;
+
+            if self.check_window_density(window.clone(), number_of_elements) != Ordering::Equal {
+                // Rebalance + insert in the window
+                /*
+                eprintln!("Not balanced !");
+                let number_of_segments = window.len();
+                let height = (window.len() as f64).log2() as usize;
+                let current_number_of_elements = self.window(window.clone()).count();
+
+                let elements_per_segment =
+                    (number_of_elements + current_number_of_elements) / number_of_segments;
+                let modulo = (number_of_elements + current_number_of_elements) % number_of_segments;
+
+                let element_counts_slice = self.element_counts.as_mut_slice();
+
+                let slice = self.data.as_mut_slice();
+
+                for (index, element) in (0u32..(number_of_segments as u32))
+                    .zip(window.clone())
+                    .flat_map(|(i, segment)| {
+                        let offset = segment * segment_size;
+                        let reversed = i.reverse_bits() >> (32 - height);
+                        let range = offset
+                            ..offset
+                                + elements_per_segment
+                                + if reversed < modulo as u32 { 1 } else { 0 };
+                        element_counts_slice[window.start + i as usize] = range.len(); // Update the sizes
+                        range
+                    })
+                    .zip(itertools::kmerge(
+                        once(self.window(window.clone()).cloned()).chain(once(elements)),
+                    ))
+                {
+                    slice[index] = element;
+                }
+                 */
+            } else {
+                let pivot_segment_index = (window.len() / 2) + window.start;
+                let pivot = self.get(pivot_segment_index, 0).unwrap();
+                dbg!(pivot_segment_index);
+
+                let mut left: Vec<T> = Vec::new();
+                let mut right: Vec<T> = Vec::new();
+
+                let elements_in_window = self.window(window.clone()).count();
+
+                for element in elements {
+                    if element <= *pivot && left.len() < elements_in_window {
+                        left.push(element);
+                    } else {
+                        right.push(element);
+                    }
+                }
+
+                if left.len() > 0 {
+                    self.perform_insert_bulk(left, window.start..pivot_segment_index);
+                }
+
+                if right.len() > 0 {
+                    self.perform_insert_bulk(right, pivot_segment_index..window.end);
+                }
+            }
+        }
+    }
+
+    pub fn insert_bulk(&mut self, elements: Vec<T>) {
+        while self.check_pma_density(elements.len()) != Ordering::Equal {
+            eprintln!("PMA density not respected, doubling...");
+            self.double_size();
+            self.calculate_bounds();
+            self.update_window_sizes();
+        }
+
+        self.perform_insert_bulk(elements, 0..self.segment_count());
+    }
 }
