@@ -2,7 +2,7 @@ use crate::merge::Merge;
 use crate::window::Window;
 use itertools::Itertools;
 use std::cmp::Ordering;
-use std::iter::{once, repeat};
+use std::iter::repeat;
 use std::ops::Range;
 
 /// A Packed-Memory Array structure implementation, which keeps gaps in the
@@ -739,5 +739,48 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         }
         self.perform_insert_bulk(elements, 0..self.segment_count());
         debug_assert!(self.check_pma_density(0) == Ordering::Equal);
+    }
+
+    /// Returns true if the searched element is present in the PMA.
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert!(pma.contains(&5));
+    ///
+    /// assert!(!pma.contains(&87));
+    /// ```
+    pub fn contains(&self, element: &T) -> bool {
+        let result = std::iter::successors(Some(0..self.data.len() / self.segment_size), |r| {
+            if r.len() == 0 {
+                None
+            } else {
+                let middle = (r.start + r.end) / 2;
+                let segment: Vec<&T> = self.segment(middle).collect();
+
+                let (first, last) = (segment.get(0).unwrap(), segment.last().unwrap());
+
+                if *last < element {
+                    Some(middle + 1..r.end)
+                } else if *first > element {
+                    Some(r.start..middle - 1)
+                } else {
+                    Some(middle..middle)
+                }
+            }
+        })
+        .last()
+        .unwrap()
+        .start;
+
+        self.segment(std::cmp::min(result, self.segment_count() - 1))
+            .cloned()
+            .collect::<Vec<T>>()
+            .as_slice()
+            .binary_search(element)
+            .is_ok()
     }
 }
