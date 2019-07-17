@@ -26,7 +26,11 @@ impl<'a, T> Iterator for Window<'a, T> {
             );
             self.current_index += 1;
 
-            while self.current_index >= self.pma.element_counts[self.segments_range.start] {
+            let segment_count = self.pma.data.len() / self.pma.segment_size;
+
+            while self.segments_range.start < segment_count
+                && self.current_index >= self.pma.element_counts[self.segments_range.start]
+            {
                 self.current_index = 0;
                 self.segments_range.start += 1;
             }
