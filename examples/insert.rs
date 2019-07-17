@@ -6,6 +6,6 @@ fn main() {
     for i in 16u32..32 {
         pma.insert(i);
     }
-    dbg!(pma.data);
-    //dbg!(&pma.elements().collect::<Vec<&u32>>());
+    //dbg!(pma.data);
+    dbg!(&pma.elements().collect::<Vec<&u32>>());
 }

@@ -1,48 +1,33 @@
-use std::iter::Peekable;
-
-pub struct Merge<I: Iterator<Item = T>, J: Iterator<Item = T>, T> {
-    left: Peekable<I>,
-    right: Peekable<J>,
+pub struct Merge<'a, T: 'a> {
+    pub(crate) slices: [&'a [T]; 2],
+    pub(crate) indexes: [usize; 2],
 }
 
-impl<I, J, T> Merge<I, J, T>
-where
-    I: Iterator<Item = T>,
-    J: Iterator<Item = T>,
-    T: PartialOrd,
-{
-    pub fn new(left: I, right: J) -> Merge<I, J, T> {
-        Merge {
-            left: left.peekable(),
-            right: right.peekable(),
-        }
+impl<'a, T: 'a> Merge<'a, T> {
+    fn advance_on(&mut self, side: usize) -> Option<&'a T> {
+        let r = Some(&self.slices[side][self.indexes[side]]);
+        self.indexes[side] += 1;
+        r
     }
 }
 
-impl<I, J, T> Iterator for Merge<I, J, T>
-where
-    I: Iterator<Item = T>,
-    J: Iterator<Item = T>,
-    T: PartialOrd,
-{
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        let (l, r) = (self.left.peek(), self.right.peek());
-
-        if l.is_none() && r.is_none() {
-            None
-        } else if r.is_some() {
-            self.right.next()
-        } else if l.is_some() {
-            self.left.next()
-        } else {
-            let (l_inner, r_inner) = (l.unwrap(), r.unwrap());
-            if l_inner < r_inner {
-                self.left.next()
+impl<'a, T: 'a + Ord> Iterator for Merge<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        let slice1_is_empty = self.indexes[0] >= self.slices[0].len();
+        let slice2_is_empty = self.indexes[1] >= self.slices[1].len();
+        if !slice1_is_empty && !slice2_is_empty {
+            if self.slices[0][self.indexes[0]] <= self.slices[1][self.indexes[1]] {
+                self.advance_on(0)
             } else {
-                self.right.next()
+                self.advance_on(1)
             }
+        } else if !slice1_is_empty {
+            self.advance_on(0)
+        } else if !slice2_is_empty {
+            self.advance_on(1)
+        } else {
+            None
         }
     }
 }
