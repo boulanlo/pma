@@ -245,37 +245,43 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     /// ```
     pub fn window(&self, window: Range<usize>) -> Window<T> {
         Window {
-            pma: &self,
+            segment_size: self.segment_size,
+            data: &self.data[window.start * self.segment_size..window.end * self.segment_size],
+            sizes: &self.element_counts[..],
             segments_range: window,
-            current_index: 0,
-            end_index: self.segment_size,
+            relative_index: 0,
+            absolute_index: 0,
         }
     }
 
     fn find_segment(&self, element: &T) -> usize {
-        let result = std::iter::successors(Some(0..self.data.len() / self.segment_size), |r| {
-            if r.len() == 0 {
-                None
-            } else {
-                let middle = (r.start + r.end) / 2;
-                let segment: Vec<&T> = self.segment(middle).collect();
-
-                let (first, last) = (segment.get(0).unwrap(), segment.last().unwrap());
-
-                if *last < element {
-                    Some(middle + 1..r.end)
-                } else if *first > element {
-                    Some(r.start..middle - 1)
+        if self.segment_count() == 1 {
+            0
+        } else {
+            let result = std::iter::successors(Some(0..self.data.len() / self.segment_size), |r| {
+                if r.len() == 0 {
+                    None
                 } else {
-                    Some(middle..middle)
-                }
-            }
-        })
-        .last()
-        .unwrap()
-        .start;
+                    let middle = (r.start + r.end) / 2;
+                    let segment: Vec<&T> = self.segment(middle).collect();
 
-        std::cmp::min(result, self.segment_count() - 1)
+                    let (first, last) = (segment.get(0).unwrap(), segment.last().unwrap());
+
+                    if *last < element {
+                        Some(middle + 1..r.end)
+                    } else if *first > element {
+                        Some(r.start..if middle == 0 { 0 } else { middle - 1 })
+                    } else {
+                        Some(middle..middle)
+                    }
+                }
+            })
+            .last()
+            .unwrap()
+            .start;
+
+            std::cmp::min(result, self.segment_count() - 1)
+        }
     }
 
     /// Returns an iterator over the elements in the PMA.
@@ -495,29 +501,23 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     fn update_window_sizes(&mut self) {
         // Calculate the amount of data in each window, from the segment to the whole
         // PMA.
-        let height = (self.segment_count() as f64).log2() as usize;
 
-        let window_element_counts: Vec<usize> = self
-            .element_counts
-            .iter()
-            .take(self.segment_count())
-            .copied()
-            .collect();
+        let window_element_counts: Vec<usize> =
+            self.element_counts[0..self.segment_count()].to_vec();
 
-        let mut consecutive_window_counts = vec![window_element_counts];
-
-        for _ in 0..height {
-            let window_counts: Vec<usize> = consecutive_window_counts
-                .last()
-                .unwrap()
-                .chunks(2)
-                .map(|x| x.iter().sum())
-                .collect();
-            consecutive_window_counts.push(window_counts);
-        }
-
-        let element_counts: Vec<usize> = consecutive_window_counts.into_iter().flatten().collect();
-        self.element_counts = element_counts;
+        self.element_counts = std::iter::successors(Some(window_element_counts), |vec| {
+            if vec.len() > 1 {
+                Some(
+                    vec.chunks(2)
+                        .map(|x| x.iter().sum())
+                        .collect::<Vec<usize>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
     }
 
     fn calculate_bounds(&mut self) {
@@ -581,29 +581,16 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         }
 
         let segment = self.find_segment(&element);
-
-        // Dichotomy search for position in segment for insertion
-        let start = segment * self.segment_size;
-        let end = start + self.element_counts.get(segment).unwrap();
-
-        let index: usize = std::iter::successors(Some(start..end), |r| {
-            // Can't use r.is_empty() because of multiple implementations (??)
-            if r.len() == 0 {
-                None
-            } else {
-                let middle = (r.start + r.end) / 2;
-                if self.data[middle] > element {
-                    Some(r.start..(middle - 1))
-                } else if self.data[middle] < element {
-                    Some((middle + 1)..r.end)
-                } else {
-                    Some(middle..middle)
-                }
-            }
-        })
-        .last()
-        .unwrap()
-        .start;
+        let index = match self
+            .segment(segment)
+            .cloned()
+            .collect::<Vec<T>>()
+            .as_slice()
+            .binary_search(&element)
+        {
+            Ok(i) => segment * self.segment_size + i,
+            Err(i) => segment * self.segment_size + i,
+        };
 
         let current_count = *self.element_counts.get(segment).unwrap();
 
@@ -732,12 +719,55 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     /// }
     /// ```
     pub fn insert_bulk(&mut self, elements: Vec<T>) {
-        while self.check_pma_density(elements.len()) != Ordering::Equal {
-            self.double_size();
+        if self.check_pma_density(elements.len()) != Ordering::Equal {
+            // Find appropriate size
+            let element_count = self.element_counts.last().unwrap() + elements.len();
+            let pma_size_upper = (element_count * 2).next_power_of_two();
+            let pma_size_lower = pma_size_upper / 2;
+            let pma_size = if (0.5 - (element_count as f64 / pma_size_upper as f64)).abs()
+                < (0.5 - (element_count as f64 / pma_size_lower as f64)).abs()
+            {
+                pma_size_upper
+            } else {
+                pma_size_lower
+            };
+
+            // Create new data vector
+            let mut data: Vec<T> = Vec::with_capacity(pma_size);
+
+            unsafe {
+                data.set_len(pma_size);
+            }
+
+            // Create element count vector
+            let element_counts: Vec<usize> = self
+                .index_iterator(0..(pma_size / self.segment_size), element_count)
+                .map(|r| r.len())
+                .collect();
+
+            let current_elements: Vec<T> = self.elements().cloned().collect();
+
+            let indexes_iterator = self
+                .index_iterator(0..(pma_size / self.segment_size), element_count)
+                .flatten();
+
+            let merge_iterator = Merge {
+                slices: [current_elements.as_slice(), elements.as_slice()],
+                indexes: [0, 0],
+            };
+
+            for (destination_index, element) in indexes_iterator.zip(merge_iterator) {
+                data.as_mut_slice()[destination_index] = unsafe { std::ptr::read(element) }
+            }
+
+            self.data = data;
+            self.element_counts = element_counts;
+
             self.calculate_bounds();
             self.update_window_sizes();
+        } else {
+            self.perform_insert_bulk(elements, 0..self.segment_count());
         }
-        self.perform_insert_bulk(elements, 0..self.segment_count());
         debug_assert!(self.check_pma_density(0) == Ordering::Equal);
     }
 
