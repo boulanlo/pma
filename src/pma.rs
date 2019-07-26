@@ -1,6 +1,9 @@
-use crate::merge::Merge;
-use crate::window::Window;
+use crate::index_iterator::IndexIterator;
+use crate::index_par_iterator::IndexParIterator;
+use crate::parallel_merge::ParallelMerge;
+use crate::pma_zip::PMAZip;
 use itertools::Itertools;
+use rayon_adaptive::prelude::*;
 use std::cmp::Ordering;
 use std::iter::repeat;
 use std::ops::Range;
@@ -40,7 +43,7 @@ pub struct PMA<T> {
     segment_density_bounds: Range<f64>,
 }
 
-impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
+impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
     /// Creates a PMA from an `ExactSizeIterator`.
     ///
     /// The current algorithm for creating the PMA guarantees that the density
@@ -198,11 +201,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         }
     }
 
-    fn pma_bounds(&self) -> &Range<usize> {
+    pub fn pma_bounds(&self) -> &Range<usize> {
         self.bounds.last().unwrap()
     }
 
-    fn segment_bounds(&self) -> &Range<usize> {
+    pub fn segment_bounds(&self) -> &Range<usize> {
         self.bounds.get(0).unwrap()
     }
 
@@ -243,15 +246,12 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     ///
     /// assert_eq!(window, expected_result.iter().collect::<Vec<&u32>>());
     /// ```
-    pub fn window(&self, window: Range<usize>) -> Window<T> {
-        Window {
-            segment_size: self.segment_size,
-            data: &self.data[window.start * self.segment_size..window.end * self.segment_size],
-            sizes: &self.element_counts[..],
-            segments_range: window,
-            relative_index: 0,
-            absolute_index: 0,
-        }
+    pub fn window(&self, window: Range<usize>) -> impl Iterator<Item = &T> {
+        window
+            .flat_map(move |r| {
+                r * self.segment_size..(r * self.segment_size) + self.element_counts[r]
+            })
+            .map(move |i| self.data.get(i).unwrap())
     }
 
     fn find_segment(&self, element: &T) -> usize {
@@ -302,11 +302,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
     /// assert_eq!(elements.next(), Some(&31));
     /// assert_eq!(elements.next(), None);
     /// ```
-    pub fn elements(&self) -> Window<T> {
+    pub fn elements(&self) -> impl Iterator<Item = &T> {
         self.window(0..self.segment_count())
     }
 
-    fn check_segment_density(&self, segment: usize, increment: usize) -> Ordering {
+    pub fn check_segment_density(&self, segment: usize, increment: usize) -> Ordering {
         let bounds = self.segment_bounds();
         let size = self.segment(segment).count() + increment;
 
@@ -386,23 +386,24 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         let elements_per_segment = number_of_elements / number_of_segments;
         let modulo = number_of_elements % number_of_segments;
 
-        //        let element_counts_slice = self.element_counts.as_mut_slice();
+        window.clone().enumerate().map(move |(i, segment)| {
+            let offset = segment * segment_size;
+            let reversed = (i as u32).reverse_bits() >> (32 - height);
+            let range = offset
+                ..offset + elements_per_segment + if reversed < modulo as u32 { 1 } else { 0 };
+            range
+        })
+    }
 
-        (0u32..(number_of_segments as u32))
-            .zip(window.clone())
-            .map(move |(i, segment)| {
-                let offset = segment * segment_size;
-                let reversed = i.reverse_bits() >> (32 - height);
-                let range = offset
-                    ..offset + elements_per_segment + if reversed < modulo as u32 { 1 } else { 0 };
-                //element_counts_slice[window.start + i as usize] = range.len(); // Update the sizes
-                range
-            })
+    fn index_par_iterator(
+        &self,
+        window: Range<usize>,
+        number_of_elements: usize,
+    ) -> IndexParIterator<'_, T> {
+        IndexParIterator(IndexIterator::new(self, window, number_of_elements))
     }
 
     fn rebalance(&mut self, window: Range<usize>) {
-        // idée : prendre en compte l'élément à insérer pour éviter les boucles infinies
-
         // Get the indexes of all the elements in the window
         let segment_size = self.segment_size;
         let offset = window.start * segment_size;
@@ -460,15 +461,9 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         let modulo = element_count % segment_count;
         let height = (segment_count as f64).log2() as usize;
 
-        // Iterator over the desired sizes of each segment
-        /*
-        let sizes_iterator = repeat(elements_per_segment + 1)
-            .take(modulo)
-            .chain(repeat(elements_per_segment).take(segment_count - modulo));
-         */
-
         let mut element_counts: Vec<usize> = Vec::new();
 
+        // Iterator over the desired sizes of each segment
         let sizes_iterator = (0u32..(segment_count as u32))
             .enumerate()
             .map(|(segment, i)| {
@@ -622,16 +617,21 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
         }
         self.update_window_sizes();
 
-        let indexes_iterator = self
-            .index_iterator(window.clone(), current_elements.len() + elements.len())
-            .flatten();
+        let indexes_iterator =
+            self.index_par_iterator(window.clone(), current_elements.len() + elements.len());
 
-        let merge_iterator = Merge {
-            slices: [current_elements.as_slice(), elements.as_slice()],
-            indexes: [0, 0],
+        let merge_iterator = ParallelMerge {
+            left: current_elements.into_par_iter(),
+            right: elements.into_par_iter(),
         };
 
-        for (destination_index, element) in indexes_iterator.zip(merge_iterator) {
+        let result = PMAZip {
+            indexed_iterator: indexes_iterator,
+            blocked_iterator: merge_iterator,
+        }
+        .collect::<Vec<(usize, &T)>>();
+
+        for (destination_index, element) in result {
             self.data.as_mut_slice()[destination_index] = unsafe { std::ptr::read(element) }
         }
     }
@@ -644,7 +644,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
             let segment_size = self.segment_size;
             let mut element_count = 0;
 
-            for (index, element) in (Merge {
+            for (index, element) in (crate::merge::Merge {
                 slices: [
                     self.segment(window.start)
                         .cloned()
@@ -747,16 +747,21 @@ impl<T: Ord + Clone + Default + std::fmt::Debug> PMA<T> {
 
             let current_elements: Vec<T> = self.elements().cloned().collect();
 
-            let indexes_iterator = self
-                .index_iterator(0..(pma_size / self.segment_size), element_count)
-                .flatten();
+            let indexes_iterator =
+                self.index_par_iterator(0..(pma_size / self.segment_size), element_count);
 
-            let merge_iterator = Merge {
-                slices: [current_elements.as_slice(), elements.as_slice()],
-                indexes: [0, 0],
+            let merge_iterator = ParallelMerge {
+                left: current_elements.into_par_iter(),
+                right: elements.into_par_iter(),
             };
 
-            for (destination_index, element) in indexes_iterator.zip(merge_iterator) {
+            let result = PMAZip {
+                indexed_iterator: indexes_iterator,
+                blocked_iterator: merge_iterator,
+            }
+            .collect::<Vec<(usize, &T)>>();
+
+            for (destination_index, element) in result {
                 data.as_mut_slice()[destination_index] = unsafe { std::ptr::read(element) }
             }
 
