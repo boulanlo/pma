@@ -1,6 +1,6 @@
 pub struct Merge<'a, T: 'a> {
-    pub(crate) slices: [&'a [T]; 2],
-    pub(crate) indexes: [usize; 2],
+    pub slices: [&'a [T]; 2],
+    pub indexes: [usize; 2],
 }
 
 impl<'a, T: 'a> Merge<'a, T> {

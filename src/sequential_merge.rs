@@ -1,10 +1,11 @@
 use crate::parallel_merge::ParallelMerge;
 use rayon_adaptive::prelude::*;
 
-pub struct SequentialMerge<I, J> {
-    pub(crate) left: Option<I>,
-    pub(crate) right: Option<J>,
-    pub(crate) counter: usize,
+pub struct SequentialMerge<I: PeekableIterator, J: PeekableIterator> {
+    pub(crate) left: I,
+    pub(crate) right: J,
+    pub(crate) left_size: usize,
+    pub(crate) right_size: usize,
     pub(crate) parallel_iterator: *mut ParallelMerge<I, J>,
 }
 
@@ -17,57 +18,36 @@ where
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.counter == 0 {
-            return None;
-        }
-
-        self.counter -= 1;
-
-        let (left_iterator, right_iterator) = if self.parallel_iterator.is_null() {
-            (self.left.as_mut().unwrap(), self.right.as_mut().unwrap())
-        } else {
-            unsafe {
-                (
-                    &mut (*self.parallel_iterator).left,
-                    &mut (*self.parallel_iterator).right,
-                )
-            }
-        };
-
-        let (left, right) = (
-            left_iterator.base_length().unwrap() > 0,
-            right_iterator.base_length().unwrap() > 0,
-        );
-
-        if left && right {
-            let (left, right) = (left_iterator.peek(0), right_iterator.peek(0));
-
-            if left < right {
-                left_iterator.next()
+        if self.left_size != 0 && self.right_size != 0 {
+            if self.left.peek(0) <= self.right.peek(0) {
+                self.left_size -= 1;
+                self.left.next()
             } else {
-                right_iterator.next()
+                self.right_size -= 1;
+                self.right.next()
             }
-        } else if left {
-            left_iterator.next()
-        } else if right {
-            right_iterator.next()
+        } else if self.left_size != 0 {
+            // no need to decrement counter: we always come here anyway
+            self.left.next()
         } else {
-            None
+            self.right.next()
         }
     }
 }
 
-/*
-impl<I, J> Drop for SequentialMerge<I, J> {
+impl<I, J> Drop for SequentialMerge<I, J>
+where
+    I: PeekableIterator,
+    J: PeekableIterator,
+{
     fn drop(&mut self) {
+        let mut empty_left = self.left.divide_on_left_at(0);
+        std::mem::swap(&mut empty_left, &mut self.left);
+        let mut empty_right = self.right.divide_on_left_at(0);
+        std::mem::swap(&mut empty_right, &mut self.right);
         if let Some(destination) = unsafe { self.parallel_iterator.as_mut() } {
-            unsafe {
-                destination.left = std::ptr::read(&self.left as *const I);
-                destination.right = std::ptr::read(&self.right as *const J);
-            }
-            std::mem::forget(self.left);
-            std::mem::forget(self.right);
+            destination.left = empty_left;
+            destination.right = empty_right;
         }
     }
 }
-*/

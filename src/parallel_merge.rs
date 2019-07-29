@@ -1,10 +1,11 @@
 extern crate rayon_adaptive;
 use crate::sequential_merge::SequentialMerge;
 use rayon_adaptive::prelude::*;
+use std::iter::Take;
 
 pub struct ParallelMerge<I, J> {
-    pub(crate) left: I,
-    pub(crate) right: J,
+    pub left: I,
+    pub right: J,
 }
 
 impl<I, J, T> ParallelMerge<I, J>
@@ -143,24 +144,31 @@ where
     T: Sync + Send + Ord,
 {
     type Item = T;
-    type SequentialIterator = SequentialMerge<I, J>;
+    type SequentialIterator = Take<SequentialMerge<I, J>>;
 
     fn to_sequential(self) -> Self::SequentialIterator {
-        let counter = self.left.base_length().unwrap() + self.right.base_length().unwrap();
+        let left_size = self.left.base_length().unwrap();
+        let right_size = self.right.base_length().unwrap();
         SequentialMerge {
-            left: Some(self.left),
-            right: Some(self.right),
-            counter,
+            left: self.left,
+            right: self.right,
+            left_size,
+            right_size,
             parallel_iterator: std::ptr::null_mut(),
         }
+        .take(left_size + right_size)
     }
 
     fn extract_iter(&mut self, index: usize) -> Self::SequentialIterator {
+        let left_size = self.left.base_length().unwrap();
+        let right_size = self.right.base_length().unwrap();
         SequentialMerge {
-            left: None,
-            right: None,
-            counter: index,
+            left: unsafe { std::ptr::read(&self.left as *const I) },
+            right: unsafe { std::ptr::read(&self.right as *const J) },
+            left_size,
+            right_size,
             parallel_iterator: self as *mut ParallelMerge<I, J>,
         }
+        .take(index)
     }
 }
