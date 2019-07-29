@@ -152,21 +152,15 @@ where
         SequentialMerge {
             left: self.left,
             right: self.right,
-            left_size,
-            right_size,
             parallel_iterator: std::ptr::null_mut(),
         }
         .take(left_size + right_size)
     }
 
     fn extract_iter(&mut self, index: usize) -> Self::SequentialIterator {
-        let left_size = self.left.base_length().unwrap();
-        let right_size = self.right.base_length().unwrap();
         SequentialMerge {
             left: unsafe { std::ptr::read(&self.left as *const I) },
             right: unsafe { std::ptr::read(&self.right as *const J) },
-            left_size,
-            right_size,
             parallel_iterator: self as *mut ParallelMerge<I, J>,
         }
         .take(index)

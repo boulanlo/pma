@@ -4,8 +4,6 @@ use rayon_adaptive::prelude::*;
 pub struct SequentialMerge<I: PeekableIterator, J: PeekableIterator> {
     pub(crate) left: I,
     pub(crate) right: J,
-    pub(crate) left_size: usize,
-    pub(crate) right_size: usize,
     pub(crate) parallel_iterator: *mut ParallelMerge<I, J>,
 }
 
@@ -18,16 +16,15 @@ where
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.left_size != 0 && self.right_size != 0 {
+        let left_slice_is_empty = self.left.is_empty();
+        let right_slice_is_empty = self.right.is_empty();
+        if !left_slice_is_empty && !right_slice_is_empty {
             if self.left.peek(0) <= self.right.peek(0) {
-                self.left_size -= 1;
                 self.left.next()
             } else {
-                self.right_size -= 1;
                 self.right.next()
             }
-        } else if self.left_size != 0 {
-            // no need to decrement counter: we always come here anyway
+        } else if right_slice_is_empty {
             self.left.next()
         } else {
             self.right.next()
