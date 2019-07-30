@@ -4,9 +4,13 @@ version = "0.1.0"
 authors = ["Louis Boulanger <louis.boulanger74@hotmail.fr>"]
 edition = "2018"
 
+[profile.release]
+debug = true
+
 [dependencies]
 rayon_logs = {optional=true, git="https://github.com/wagnerf42/rayon-logs"}
 rayon_adaptive = {path="../rayon-adaptive", features=["logs"]}
 itertools = "*"
 rand = "*"
 either = "*"
+time = "*"

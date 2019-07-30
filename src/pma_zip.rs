@@ -15,10 +15,12 @@ where
     type Power = rayon_adaptive::BlockedPower;
 
     fn base_length(&self) -> Option<usize> {
-        Some(
-            self.indexed_iterator.base_length().unwrap()
-                + self.blocked_iterator.base_length().unwrap(),
-        )
+        debug_assert_eq!(
+            self.indexed_iterator.base_length(),
+            self.blocked_iterator.base_length()
+        );
+
+        self.indexed_iterator.base_length()
     }
 
     fn divide_at(self, index: usize) -> (Self, Self) {
@@ -26,6 +28,9 @@ where
         let len = blocked_left.base_length().unwrap();
 
         let (indexed_left, indexed_right) = self.indexed_iterator.divide_at(len);
+
+        debug_assert_eq!(indexed_left.base_length(), blocked_left.base_length());
+        debug_assert_eq!(indexed_right.base_length(), blocked_right.base_length());
 
         (
             PMAZip {

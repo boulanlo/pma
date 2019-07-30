@@ -1,4 +1,3 @@
-use crate::index_iterator::IndexIterator;
 use crate::index_par_iterator::IndexParIterator;
 use crate::parallel_merge::ParallelMerge;
 use crate::pma_zip::PMAZip;
@@ -319,11 +318,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         }
     }
 
-    fn check_window_density(&self, window: Range<usize>, increment: usize) -> Ordering {
-        let height = (window.len() as f64).log2() as usize;
+    fn check_subtree_density(&self, subtree_index: usize, increment: usize) -> Ordering {
+        let height = (self.bounds.len() - 1) - ((subtree_index + 1) as f64).log2().floor() as usize;
         let bounds = self.bounds.get(height).unwrap();
 
-        let size = self.window(window).count() + increment;
+        let size = self.element_counts[self.element_counts.len() - subtree_index - 1] + increment;
 
         if size < bounds.start {
             Ordering::Less
@@ -335,11 +334,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
     }
 
     fn check_pma_density(&self, increment: usize) -> Ordering {
-        self.check_window_density(0..self.segment_count(), increment)
+        self.check_subtree_density(0, increment)
     }
 
     pub fn pma_density(&self) -> f64 {
-        self.elements().count() as f64 / self.data.len() as f64
+        *self.element_counts.last().unwrap() as f64 / self.data.len() as f64
     }
 
     fn find_stable_window(&self, segment: usize, inserted_size: usize) -> Option<Range<usize>> {
@@ -358,20 +357,25 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
 
         (0..=bits)
             .rev()
-            .map(|i| {
+            .scan(0, |pos, bit| {
+                let old_pos = *pos;
+                *pos = old_pos + if bit == 1 { 1 } else { 2 };
+                Some((self.element_counts.len() - old_pos - 1, bit))
+            })
+            .map(|(p, i)| {
                 let mut mask = 2usize.pow((bits - i) as u32) - 1;
                 mask <<= i;
 
                 let start = segment & mask;
                 let end = start + 2usize.pow(i as u32);
 
-                start..end
+                (p, start..end)
             })
             .tuple_windows()
-            .find(|(_, window)| {
-                self.check_window_density(window.clone(), inserted_size) != Ordering::Equal
+            .find(|(_, (p, _window))| {
+                self.check_subtree_density(*p, inserted_size) != Ordering::Equal
             })
-            .map(|(x, _)| x)
+            .map(|((_, x), _)| x)
     }
 
     fn index_iterator(
@@ -400,7 +404,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         window: Range<usize>,
         number_of_elements: usize,
     ) -> IndexParIterator<'_, T> {
-        IndexParIterator(IndexIterator::new(self, window, number_of_elements))
+        IndexParIterator::new(self, window, number_of_elements)
     }
 
     fn rebalance(&mut self, window: Range<usize>) {
@@ -605,17 +609,50 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         debug_assert_eq!(self.check_pma_density(0), Ordering::Equal);
     }
 
-    fn rebalance_insert(&mut self, window: Range<usize>, elements: Vec<T>) {
+    fn update_sizes(&mut self, subtree_index: usize, height: usize, element_count: usize) {
+        let element_counts_index = self.element_counts.len() - subtree_index - 1;
+        self.element_counts[element_counts_index] = element_count;
+
+        let right_subtree = subtree_index * 2 + 1;
+        let left_subtree = right_subtree + 1;
+
+        let floor = element_count / 2;
+        let ceil = element_count - floor;
+
+        if height != 0 {
+            self.update_sizes(left_subtree, height - 1, ceil);
+            self.update_sizes(right_subtree, height - 1, floor);
+        }
+    }
+
+    fn propagate_size_update(&mut self, mut subtree_index: usize) {
+        while subtree_index != 0 {
+            subtree_index = (subtree_index - 1) / 2;
+            let right_child = subtree_index * 2 + 1;
+            let left_child = right_child + 1;
+
+            let len = self.element_counts.len() - 1;
+
+            self.element_counts[len - subtree_index] =
+                self.element_counts[len - left_child] + self.element_counts[len - right_child];
+        }
+    }
+
+    fn rebalance_insert(&mut self, window: Range<usize>, subtree_index: usize, elements: Vec<T>) {
         let current_elements: Vec<T> = self.window(window.clone()).cloned().collect();
 
-        for (size_index, size) in self
-            .index_iterator(window.clone(), current_elements.len() + elements.len())
-            .map(|r| r.len())
-            .enumerate()
-        {
-            self.element_counts[window.start + size_index] = size;
-        }
-        self.update_window_sizes();
+        let element_count = current_elements.len() + elements.len();
+        let segment_count = self.segment_count();
+
+        let height = (segment_count as f64).log2() as usize;
+
+        // Update element_counts before index_iterator
+        self.update_sizes(
+            subtree_index,
+            height - ((subtree_index + 1) as f64).log2().floor() as usize,
+            element_count,
+        );
+        self.propagate_size_update(subtree_index);
 
         let indexes_iterator =
             self.index_par_iterator(window.clone(), current_elements.len() + elements.len());
@@ -624,6 +661,8 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
             left: current_elements.into_par_iter(),
             right: elements.into_par_iter(),
         };
+
+        debug_assert_eq!(indexes_iterator.base_length(), merge_iterator.base_length());
 
         let result = PMAZip {
             indexed_iterator: indexes_iterator,
@@ -636,7 +675,12 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         }
     }
 
-    fn perform_insert_bulk(&mut self, mut elements: Vec<T>, window: Range<usize>) {
+    fn perform_insert_bulk(
+        &mut self,
+        mut elements: Vec<T>,
+        window: Range<usize>,
+        subtree_index: usize,
+    ) {
         // Find the pivot : first element of right window
         if window.len() < 2 {
             debug_assert!(elements.len() < self.segment_size - self.element_counts[window.start]);
@@ -672,27 +716,25 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
                 Err(i) => i,
             };
 
-            // Check density beforehand
-            let (window_left, window_right) = (
-                window.start..pivot_segment_index,
-                pivot_segment_index..window.end,
-            );
+            let subtree_right = 2 * subtree_index + 1;
+            let subtree_left = subtree_right + 1;
 
-            if self.check_window_density(window_left, element_pivot) != Ordering::Equal
-                || self.check_window_density(window_right, elements.len() - element_pivot)
+            // Check density beforehand
+            if self.check_subtree_density(subtree_left, element_pivot) != Ordering::Equal
+                || self.check_subtree_density(subtree_right, elements.len() - element_pivot)
                     != Ordering::Equal
             {
-                self.rebalance_insert(window, elements);
+                self.rebalance_insert(window, subtree_index, elements);
             } else {
                 let right = elements.split_off(element_pivot);
                 let left = elements;
 
                 if left.len() > 0 {
-                    self.perform_insert_bulk(left, window.start..pivot_segment_index);
+                    self.perform_insert_bulk(left, window.start..pivot_segment_index, subtree_left);
                 }
 
                 if right.len() > 0 {
-                    self.perform_insert_bulk(right, pivot_segment_index..window.end);
+                    self.perform_insert_bulk(right, pivot_segment_index..window.end, subtree_right);
                 }
             }
         }
@@ -739,13 +781,14 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
                 data.set_len(pma_size);
             }
 
-            // Create element count vector
-            let element_counts: Vec<usize> = self
-                .index_iterator(0..(pma_size / self.segment_size), element_count)
-                .map(|r| r.len())
-                .collect();
+            let segment_count = pma_size / self.segment_size;
+            let height = (segment_count as f64).log2() as usize;
 
             let current_elements: Vec<T> = self.elements().cloned().collect();
+
+            // Create element count vector
+            self.element_counts = std::iter::repeat(0).take(segment_count * 2 - 1).collect();
+            self.update_sizes(0, height, element_count);
 
             let indexes_iterator =
                 self.index_par_iterator(0..(pma_size / self.segment_size), element_count);
@@ -766,12 +809,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
             }
 
             self.data = data;
-            self.element_counts = element_counts;
 
             self.calculate_bounds();
             self.update_window_sizes();
         } else {
-            self.perform_insert_bulk(elements, 0..self.segment_count());
+            self.perform_insert_bulk(elements, 0..self.segment_count(), 0);
         }
         debug_assert!(self.check_pma_density(0) == Ordering::Equal);
     }

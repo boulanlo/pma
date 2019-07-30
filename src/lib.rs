@@ -1,3 +1,5 @@
+#![warn(clippy::all)]
+
 ///! A packed-memory array structure implementation
 pub mod index_iterator;
 pub mod index_par_iterator;

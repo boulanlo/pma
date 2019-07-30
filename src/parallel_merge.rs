@@ -62,6 +62,8 @@ where
             .start
         }
 
+        debug_assert!(self.base_length().unwrap() > 0);
+
         if self.left.base_length().unwrap() > self.right.base_length().unwrap() {
             if self.right.base_length().unwrap() == 0 {
                 let (left_left, left_right) = self.left.divide();
