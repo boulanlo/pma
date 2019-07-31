@@ -1,6 +1,7 @@
 use crate::index_par_iterator::IndexParIterator;
 use crate::parallel_merge::ParallelMerge;
 use crate::pma_zip::PMAZip;
+use crate::Bounds;
 use itertools::Itertools;
 use rayon_adaptive::prelude::*;
 use std::cmp::Ordering;
@@ -35,7 +36,7 @@ use std::ops::Range;
 #[derive(Debug)]
 pub struct PMA<T> {
     pub data: Vec<T>,
-    pub(crate) bounds: Vec<Range<usize>>,
+    pub(crate) bounds: Vec<Bounds>,
     pub(crate) segment_size: usize,
     pub(crate) element_counts: Vec<usize>,
     pma_density_bounds: Range<f64>,
@@ -110,15 +111,15 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
 
         // Calculate the PMA and segment bounds from the density bounds
         let pma_size = data.len();
-        let pma_bounds: Range<usize> = (pma_density_bounds.start * pma_size as f64).round() as usize
+        let pma_bounds: Bounds = (pma_density_bounds.start * pma_size as f64).round() as usize
             ..(pma_density_bounds.end * pma_size as f64).round() as usize;
-        let segment_bounds: Range<usize> = (segment_density_bounds.start * segment_size as f64)
-            .round() as usize
+        let segment_bounds: Bounds = (segment_density_bounds.start * segment_size as f64).round()
+            as usize
             ..(segment_density_bounds.end * segment_size as f64).round() as usize;
 
         // Calculate the window bounds
         let height = ((pma_size / segment_size) as f64).log2() as usize;
-        let mut bounds: Vec<Range<usize>> = Vec::new();
+        let mut bounds: Vec<Bounds> = Vec::new();
 
         bounds.push(segment_bounds);
 
@@ -200,11 +201,11 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         }
     }
 
-    pub fn pma_bounds(&self) -> &Range<usize> {
+    pub fn pma_bounds(&self) -> &Bounds {
         self.bounds.last().unwrap()
     }
 
-    pub fn segment_bounds(&self) -> &Range<usize> {
+    pub fn segment_bounds(&self) -> &Bounds {
         self.bounds.get(0).unwrap()
     }
 
@@ -500,15 +501,15 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
 
     fn calculate_bounds(&mut self) {
         let pma_size = self.data.len();
-        let pma_bounds: Range<usize> = (self.pma_density_bounds.start * pma_size as f64) as usize
+        let pma_bounds: Bounds = (self.pma_density_bounds.start * pma_size as f64) as usize
             ..(self.pma_density_bounds.end * pma_size as f64) as usize;
-        let segment_bounds: Range<usize> = (self.segment_density_bounds.start
-            * self.segment_size as f64) as usize
+        let segment_bounds: Bounds = (self.segment_density_bounds.start * self.segment_size as f64)
+            as usize
             ..(self.segment_density_bounds.end * self.segment_size as f64) as usize;
 
         // Calculate the window bounds
         let height = ((pma_size / self.segment_size) as f64).log2() as usize;
-        let mut bounds: Vec<Range<usize>> = Vec::new();
+        let mut bounds: Vec<Bounds> = Vec::new();
 
         bounds.push(segment_bounds);
 
