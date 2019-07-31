@@ -390,28 +390,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
             number_of_elements += 1;
         }
 
-        /*
-        let number_of_segments = window.len();
-        let height = (window.len() as f64).log2() as usize;
-
-        let elements_per_segment = number_of_elements / number_of_segments;
-        let modulo = number_of_elements % number_of_segments;
-
-        let element_counts_slice = self.element_counts.as_mut_slice();
-
-        // TODO: Find a way to use the index_iterator function without the borrow problems
-        let indexes_iterator = (0u32..(number_of_segments as u32))
-            .zip(window.clone())
-            .flat_map(move |(i, segment)| {
-                let offset = segment * segment_size;
-                let reversed = i.reverse_bits() >> (32 - height);
-                let range = offset
-                    ..offset + elements_per_segment + if reversed < modulo as u32 { 1 } else { 0 };
-                element_counts_slice[window.start + i as usize] = range.len(); // Update the sizes
-                range
-            });
-         */
-
         self.element_counts
             .update(subtree_index, number_of_elements);
 
