@@ -68,31 +68,6 @@ impl<'a, T> IndexIterator<'a, T> {
             )
         }
     }
-
-    fn cut(
-        &self,
-        start: usize,
-        height: usize,
-        element_count: usize,
-        index: usize,
-    ) -> (usize, usize) {
-        if height == 0 {
-            (element_count, index)
-        } else {
-            let ceil = (element_count as f64 / 2.0).ceil() as usize;
-            if ceil <= index {
-                self.cut(start, height - 1, ceil, index)
-            } else {
-                let floor = ceil - 1;
-                self.cut(
-                    start + 2usize.pow(height as u32 - 1),
-                    height - 1,
-                    floor,
-                    index - ceil,
-                )
-            }
-        }
-    }
 }
 
 impl<'a, T> Iterator for IndexIterator<'a, T> {

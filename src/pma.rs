@@ -378,27 +378,6 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
             .map(|((_, x), _)| x)
     }
 
-    fn index_iterator(
-        &self,
-        window: Range<usize>,
-        number_of_elements: usize,
-    ) -> impl Iterator<Item = Range<usize>> {
-        let number_of_segments = window.len();
-        let segment_size = self.segment_size;
-        let height = (window.len() as f64).log2() as usize;
-
-        let elements_per_segment = number_of_elements / number_of_segments;
-        let modulo = number_of_elements % number_of_segments;
-
-        window.clone().enumerate().map(move |(i, segment)| {
-            let offset = segment * segment_size;
-            let reversed = (i as u32).reverse_bits() >> (32 - height);
-            let range = offset
-                ..offset + elements_per_segment + if reversed < modulo as u32 { 1 } else { 0 };
-            range
-        })
-    }
-
     fn index_par_iterator(
         &self,
         window: Range<usize>,
