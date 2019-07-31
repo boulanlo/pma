@@ -1,8 +1,9 @@
 use crate::index_par_iterator::IndexParIterator;
 use crate::parallel_merge::ParallelMerge;
 use crate::pma_zip::PMAZip;
+use crate::subtree_indexable::SubtreeIndex;
 use crate::subtree_sizes::SubtreeSizes;
-use crate::{Bounds, DensityBounds, SegmentIndex, SubtreeIndex, Window};
+use crate::{Bounds, DensityBounds, SegmentIndex, Window};
 use itertools::Itertools;
 use rayon_adaptive::prelude::*;
 use std::cmp::Ordering;

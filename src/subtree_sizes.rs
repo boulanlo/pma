@@ -1,4 +1,5 @@
-use crate::{SegmentIndex, SubtreeIndex, SubtreeIndexable, Window};
+use crate::subtree_indexable::{SubtreeIndex, SubtreeIndexable};
+use crate::{SegmentIndex, Window};
 use std::iter::IntoIterator;
 
 #[derive(Debug)]
