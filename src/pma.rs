@@ -1,7 +1,7 @@
 use crate::index_par_iterator::IndexParIterator;
 use crate::parallel_merge::ParallelMerge;
 use crate::pma_zip::PMAZip;
-use crate::Bounds;
+use crate::{Bounds, DensityBounds};
 use itertools::Itertools;
 use rayon_adaptive::prelude::*;
 use std::cmp::Ordering;
@@ -39,8 +39,8 @@ pub struct PMA<T> {
     pub(crate) bounds: Vec<Bounds>,
     pub(crate) segment_size: usize,
     pub(crate) element_counts: Vec<usize>,
-    pma_density_bounds: Range<f64>,
-    segment_density_bounds: Range<f64>,
+    pma_density_bounds: DensityBounds,
+    segment_density_bounds: DensityBounds,
 }
 
 impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
@@ -54,8 +54,8 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
     /// ```
     pub fn from_iterator<I>(
         mut iterator: I,
-        pma_density_bounds: Range<f64>,
-        segment_density_bounds: Range<f64>,
+        pma_density_bounds: DensityBounds,
+        segment_density_bounds: DensityBounds,
         segment_size: usize,
     ) -> PMA<T>
     where

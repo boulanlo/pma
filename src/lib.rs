@@ -7,6 +7,10 @@ use std::ops::Range;
 /// a particular place in the PMA.
 type Bounds = Range<usize>;
 
+/// A density bounds, representing the allowed density (between 0 and 1) of data in a particular
+/// place in the PMA.
+type DensityBounds = Range<f64>;
+
 pub mod index_iterator;
 pub mod index_par_iterator;
 pub mod merge;
