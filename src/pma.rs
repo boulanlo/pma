@@ -176,14 +176,44 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         }
     }
 
+    /// Returns the bounds of the whole PMA
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(*pma.pma_bounds(), 19usize..45);
+    /// ```
     pub fn pma_bounds(&self) -> &Bounds {
         self.bounds.last().unwrap()
     }
 
+    /// Returns the bounds of a segment in the PMA
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(*pma.segment_bounds(), 1usize..7);
+    /// ```
     pub fn segment_bounds(&self) -> &Bounds {
         self.bounds.get(0).unwrap()
     }
 
+    /// Returns the number of segments in the PMA
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(pma.segment_count(), 8);
+    /// ```
     #[inline]
     pub fn segment_count(&self) -> usize {
         self.data.len() / self.segment_size
@@ -313,6 +343,20 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         self.check_subtree_density(0, increment)
     }
 
+    /// Returns the PMA's current density
+    ///
+    /// # Example
+    /// ```
+    /// use pma::pma::PMA;
+    ///
+    /// let mut pma = PMA::from_iterator(0u32..32, 0.3..0.7, 0.08..0.92, 8);
+    ///
+    /// assert_eq!(pma.pma_density(), 0.5);
+    ///
+    /// pma.insert(75);
+    ///
+    /// assert_eq!(pma.pma_density(), 33.0/64.0);
+    /// ```
     pub fn pma_density(&self) -> f64 {
         self.element_counts.get(0) as f64 / self.data.len() as f64
     }
