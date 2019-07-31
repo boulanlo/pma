@@ -1,10 +1,10 @@
-use crate::pma::PMA;
 use rayon_adaptive::prelude::*;
 use rayon_adaptive::IndexedPower;
 use std::ops::Range;
 
-pub struct IndexParIterator<'a, T> {
-    pub(crate) pma: &'a PMA<T>,
+pub struct IndexParIterator<'a> {
+    pub(crate) element_counts: &'a [usize],
+    pub(crate) segment_size: usize,
     pub(crate) window: Range<usize>,
     pub(crate) start_index: usize,
     pub(crate) end_index: usize,
@@ -14,18 +14,18 @@ pub struct IndexParIterator<'a, T> {
     pub(crate) element_count: usize,
 }
 
-impl<'a, T> IndexParIterator<'a, T> {
+impl<'a> IndexParIterator<'a> {
     pub fn new(
-        pma: &'a PMA<T>,
+        element_counts: &'a [usize],
+        segment_size: usize,
         window: Range<usize>,
         number_of_elements: usize,
-    ) -> IndexParIterator<'a, T> {
-        //dbg!(&window);
-        //eprintln!("{:?}", pma.element_counts);
-        let end_index = pma.element_counts[window.end - 1];
+    ) -> IndexParIterator<'a> {
+        let end_index = *element_counts.last().unwrap();
 
         IndexParIterator {
-            pma,
+            element_counts,
+            segment_size,
             window: 0..window.len(),
             start_index: 0,
             end_index,
@@ -62,10 +62,7 @@ impl<'a, T> IndexParIterator<'a, T> {
     }
 }
 
-impl<'a, T> Divisible for IndexParIterator<'a, T>
-where
-    T: Sync,
-{
+impl<'a> Divisible for IndexParIterator<'a> {
     type Power = IndexedPower;
 
     fn base_length(&self) -> Option<usize> {
@@ -74,8 +71,7 @@ where
             Some(self.end_index - self.start_index)
         } else {
             Some(
-                self.pma.element_counts[self.initial_segment + self.window.start
-                    ..self.initial_segment + self.window.end - 1]
+                self.element_counts[self.window.start..self.window.end - 1]
                     .iter()
                     .sum::<usize>()
                     + self.end_index
@@ -86,11 +82,7 @@ where
 
     fn divide_at(mut self, index: usize) -> (Self, Self) {
         debug_assert!(
-            self.skipped_elements
-                >= self.pma.element_counts
-                    [self.initial_segment..self.initial_segment + self.window.start]
-                    .iter()
-                    .sum()
+            self.skipped_elements >= self.element_counts[0..self.window.start].iter().sum()
         );
 
         let (middle_segment, middle_index) = self.cut_index(
@@ -101,7 +93,8 @@ where
         );
 
         let right = IndexParIterator {
-            pma: self.pma,
+            element_counts: self.element_counts,
+            segment_size: self.segment_size,
             window: middle_segment..self.window.end,
             start_index: middle_index,
             end_index: self.end_index,
@@ -122,10 +115,7 @@ where
     }
 }
 
-impl<'a, T> ParallelIterator for IndexParIterator<'a, T>
-where
-    T: Sync,
-{
+impl<'a> ParallelIterator for IndexParIterator<'a> {
     type Item = usize;
     type SequentialIterator = std::iter::Take<
         std::iter::Skip<
@@ -147,25 +137,21 @@ where
             (i + initial_segment) * segment_size..((i + initial_segment) * segment_size) + s
         }
 
-        let size = self.pma.element_counts
-            [self.initial_segment + self.window.start..self.initial_segment + self.window.end]
+        let size = self.element_counts[self.window.clone()]
             .iter()
             .sum::<usize>();
 
-        self.pma.element_counts
-            [self.initial_segment + self.window.start..self.initial_segment + self.window.end]
+        self.element_counts[self.window.clone()]
             .iter()
             .enumerate()
             .zip(std::iter::repeat((
-                self.pma.segment_size,
+                self.segment_size,
                 self.initial_segment + self.window.start,
             )))
             .flat_map(translate_size as fn(((usize, &usize), (usize, usize))) -> Range<usize>)
             .skip(self.start_index)
             .take(
-                size + self.end_index
-                    - self.pma.element_counts[self.initial_segment + self.window.end - 1]
-                    - self.start_index,
+                size + self.end_index - self.element_counts[self.window.end - 1] - self.start_index,
             )
     }
 

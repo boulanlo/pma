@@ -82,6 +82,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         };
 
         // Arrange data in the vector, with appropriate gaps.
+        // TODO: use IndexIterator
         let element_count_per_segment = total_element_count / segment_count;
         let modulo = total_element_count % segment_count;
         let mut data: Vec<T> = Vec::new();
@@ -383,8 +384,13 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         &self,
         window: Range<usize>,
         number_of_elements: usize,
-    ) -> IndexParIterator<'_, T> {
-        IndexParIterator::new(self, window, number_of_elements)
+    ) -> IndexParIterator<'_> {
+        IndexParIterator::new(
+            &self.element_counts[window.clone()],
+            self.segment_size,
+            window,
+            number_of_elements,
+        )
     }
 
     fn rebalance(&mut self, window: Range<usize>) {
