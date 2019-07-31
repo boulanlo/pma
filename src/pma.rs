@@ -86,6 +86,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         // Calculate the element counts
         let element_counts = SubtreeSizes::new(segment_count, total_element_count);
 
+        // Distribute the elements in the data array
         let mut data: Vec<T> = repeat(T::default())
             .take(segment_count * segment_size)
             .collect();
@@ -311,7 +312,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
         self.window(0..self.segment_count())
     }
 
-    pub fn check_segment_density(&self, segment: usize, increment: usize) -> Ordering {
+    pub fn check_segment_density(&self, segment: SegmentIndex, increment: usize) -> Ordering {
         let bounds = self.segment_bounds();
         let size = self.segment(segment).count() + increment;
 
@@ -363,7 +364,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
 
     fn find_stable_window(
         &self,
-        segment: usize,
+        segment: SegmentIndex,
         inserted_size: usize,
     ) -> Option<(Window, SubtreeIndex)> {
         // The idea is to use binary logic on the segment index to find the range.
@@ -404,7 +405,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
 
     fn index_par_iterator(
         &self,
-        window: Range<usize>,
+        window: Window,
         number_of_elements: usize,
     ) -> IndexParIterator<'_> {
         IndexParIterator::new(
@@ -593,10 +594,10 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
     fn perform_insert_bulk(
         &mut self,
         mut elements: Vec<T>,
-        window: Range<usize>,
-        subtree_index: usize,
+        window: Window,
+        subtree_index: SubtreeIndex,
     ) {
-        // Find the pivot : first element of right window
+        // Arrived at a single segment, inserting
         if window.len() < 2 {
             debug_assert!(
                 elements.len() < self.segment_size - self.element_counts.segment(window.start)
@@ -626,6 +627,7 @@ impl<T: Ord + Clone + Default + std::fmt::Debug + Sync + Send> PMA<T> {
             self.element_counts
                 .update(self.element_counts.size() - window.start, element_count);
         } else {
+            // Find the pivot : first element of right window
             let pivot_segment_index = (window.len() / 2) + window.start;
             let pivot = self.get(pivot_segment_index, 0).unwrap();
 
